@@ -207,6 +207,7 @@ def test_api_upload_status_download_auth_and_duplicate_job(tmp_path: Path, monke
     config = make_settings(tmp_path)
     api = create_app(config)
     client = TestClient(api)
+    monkeypatch.setattr(app_module, "utc_now", lambda: "2026-10-28T03:04:05+00:00")
     token = {"x-api-token": config.api_token}
     workbook = bytes_for(attendance_rows(), ".xlsx")
     calls = 0
@@ -235,7 +236,11 @@ def test_api_upload_status_download_auth_and_duplicate_job(tmp_path: Path, monke
     download = client.get("/api/reports/job-test-001/download", headers=token)
     assert download.status_code == 200
     assert download.headers["content-type"] == "application/pdf"
+    assert download.headers["content-disposition"] == (
+        'attachment; filename="PS_Attendance_Report_2026-10-28_08-34-05.pdf"'
+    )
     assert download.content.startswith(b"%PDF")
+    assert (config.data_dir / "reports" / "PS_Attendance_Report_2026-10-28_08-34-05.pdf").is_file()
 
     duplicate = client.post(
         "/api/reports",
@@ -341,11 +346,16 @@ def test_root_page_opens_directly_with_upload_and_download_workflow(tmp_path: Pa
     assert 'accept=".xls,.xlsx,.csv"' in response.text
     assert "Generate and download report" in response.text
     assert "/api/web/reports/" in response.text
+    assert "Content-Disposition" in response.text
+    assert "Khammam_PS_Attendance_Report_${jobId}" not in response.text
 
 
-def test_public_web_upload_download_works_without_token_and_keeps_job_private(tmp_path: Path):
+def test_public_web_upload_download_works_without_token_and_keeps_job_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
     config = make_settings(tmp_path)
     client = TestClient(create_app(config), base_url="https://testserver")
+    monkeypatch.setattr(app_module, "utc_now", lambda: "2026-10-28T03:04:05+00:00")
 
     upload = client.post(
         "/api/web/reports",
@@ -364,6 +374,9 @@ def test_public_web_upload_download_works_without_token_and_keeps_job_private(tm
     download = client.get(f"/api/web/reports/{job_id}/download")
     assert download.status_code == 200
     assert download.content.startswith(b"%PDF")
+    assert download.headers["content-disposition"] == (
+        'attachment; filename="PS_Attendance_Report_2026-10-28_08-34-05.pdf"'
+    )
 
     other_client = TestClient(create_app(make_settings(tmp_path / "other")), base_url="https://testserver")
     assert other_client.get(f"/api/web/reports/{job_id}").status_code == 401

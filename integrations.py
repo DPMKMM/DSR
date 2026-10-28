@@ -293,7 +293,11 @@ class LocalStorage:
         return resolved.name, resolved.read_bytes()
 
     def save_pdf(self, job_id: str, pdf_path: str | Path) -> str:
-        destination = (self.report_dir / f"{_safe_job_name(job_id)}.pdf").resolve()
+        destination = (self.report_dir / Path(pdf_path).name).resolve()
+        try:
+            destination.relative_to(self.report_dir.resolve())
+        except ValueError as exc:
+            raise ValueError("Generated report filename is invalid.") from exc
         shutil.copyfile(pdf_path, destination)
         return f"/api/reports/{job_id}/download"
 
@@ -314,11 +318,6 @@ class LocalStorage:
         destination = self.input_dir / Path(filename).name
         shutil.copyfile(local_path, destination)
         return destination.name
-
-
-def _safe_job_name(job_id: str) -> str:
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", job_id)[:100]
-    return safe or "job"
 
 
 def _google_credentials(credentials_path: str, scopes: list[str]) -> Any:
@@ -437,7 +436,7 @@ class GoogleDriveStorage:
         media = MediaFileUpload(str(destination), mimetype="application/pdf", resumable=True)
         result = self.service.files().create(
             body={
-                "name": f"Khammam_PS_Attendance_{_safe_job_name(job_id)}.pdf",
+                "name": destination.name,
                 "mimeType": "application/pdf",
                 "parents": [self.output_folder_id],
             },

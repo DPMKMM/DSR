@@ -11,6 +11,7 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -41,6 +42,7 @@ JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
 WEB_JOB_COOKIE_NAME = "khammam_web_report"
 WEB_JOB_TTL_SECONDS = 60 * 60
 WEB_UPLOADS_PER_HOUR = 20
+REPORT_FILENAME_PATTERN = re.compile(r"^PS_Attendance_Report_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\.pdf$")
 
 UPLOAD_PAGE_HTML = """<!doctype html>
 <html lang="en">
@@ -166,7 +168,9 @@ UPLOAD_PAGE_HTML = """<!doctype html>
           const objectUrl = URL.createObjectURL(blob);
           const link = document.createElement('a');
           link.href = objectUrl;
-          link.download = `Khammam_PS_Attendance_Report_${jobId}.pdf`;
+          const disposition = pdfResponse.headers.get('Content-Disposition') || '';
+          const fileName = /filename="?([^";]+)"?/i.exec(disposition)?.[1];
+          link.download = fileName || 'PS_Attendance_Report.pdf';
           document.body.appendChild(link);
           link.click();
           link.remove();
@@ -245,6 +249,28 @@ def _validate_job_id(value: str | None) -> str:
     if not JOB_ID_PATTERN.fullmatch(candidate):
         raise HTTPException(status_code=400, detail="JobID must contain 1-100 letters, numbers, underscores, or hyphens.")
     return candidate
+
+
+def _make_report_filename(report_date: date, requested_at: str) -> str:
+    try:
+        uploaded_at = datetime.fromisoformat(requested_at.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        uploaded_at = datetime.now(timezone.utc)
+    if uploaded_at.tzinfo is None:
+        uploaded_at = uploaded_at.replace(tzinfo=timezone.utc)
+    india_time = uploaded_at.astimezone(timezone(timedelta(hours=5, minutes=30)))
+    return f"PS_Attendance_Report_{report_date:%Y-%m-%d}_{india_time:%H-%M-%S}.pdf"
+
+
+def _record_report_filename(record: JobRecord) -> str:
+    match = re.search(r"(?:^|;\s*)Download filename: ([A-Za-z0-9_-]+\.pdf)(?:$|;)", record.notes)
+    if match and REPORT_FILENAME_PATTERN.fullmatch(match.group(1)):
+        return match.group(1)
+    if record.local_pdf_path:
+        candidate = Path(record.local_pdf_path).name
+        if REPORT_FILENAME_PATTERN.fullmatch(candidate):
+            return candidate
+    return "PS_Attendance_Report.pdf"
 
 
 def _safe_error(exc: Exception) -> tuple[int, str]:
@@ -474,8 +500,9 @@ def create_app(
             else:
                 filename, raw_bytes = source
             report = process_attendance_file(filename, raw_bytes)
+            download_filename = _make_report_filename(report.report_date, current.requested_at)
             with tempfile.TemporaryDirectory(prefix="khammam_attendance_") as directory:
-                output_path = Path(directory) / "Khammam_PS_Attendance_Report.pdf"
+                output_path = Path(directory) / download_filename
                 generate_pdf(report, output_path)
                 output_reference = storage.save_pdf(job_id, output_path)
             update_values: dict[str, str] = {
@@ -484,12 +511,12 @@ def create_app(
                 "notes": (
                     f"Unique GPs: {report.unique_gp_count}; duplicate LGD rows excluded: "
                     f"{report.duplicate_lgd_rows}; rows without LGD excluded: {report.missing_lgd_rows}; "
-                    f"conflicting LGDs: {len(report.conflicts)}."
+                    f"conflicting LGDs: {len(report.conflicts)}; Download filename: {download_filename}"
                 ),
             }
             if not storage.is_drive:
                 update_values["local_pdf_path"] = str(
-                    config.data_dir / "reports" / f"{_safe_local_job_name(job_id)}.pdf"
+                    config.data_dir / "reports" / download_filename
                 )
             completed = tracker.update(job_id, **update_values)
             logger.info(json.dumps({
@@ -559,7 +586,7 @@ def create_app(
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
-            headers={"Content-Disposition": 'attachment; filename="Khammam_PS_Attendance_Report.pdf"'},
+            headers={"Content-Disposition": f'attachment; filename="{_record_report_filename(record)}"'},
         )
 
     @api.post("/api/reports", status_code=200, dependencies=[Depends(authorize)])
@@ -643,7 +670,7 @@ def create_app(
         return Response(
             content=pdf_bytes,
             media_type="application/pdf",
-            headers={"Content-Disposition": 'attachment; filename="Khammam_PS_Attendance_Report.pdf"'},
+            headers={"Content-Disposition": f'attachment; filename="{_record_report_filename(record)}"'},
         )
 
     @api.post("/internal/tasks/process-report")
@@ -666,10 +693,6 @@ def create_app(
             raise HTTPException(status_code=500, detail="Report processing failed.") from None
 
     return api
-
-
-def _safe_local_job_name(job_id: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]", "_", job_id)[:100] or "job"
 
 
 app = create_app()
