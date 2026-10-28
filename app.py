@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import json
 import logging
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,207 @@ logger = logging.getLogger("khammam_attendance")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(message)s")
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
+SESSION_COOKIE_NAME = "khammam_attendance_session"
+BROWSER_SESSION_TTL_SECONDS = 8 * 60 * 60
+
+UPLOAD_PAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Khammam PS Attendance Analytics</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; }
+    body { margin: 0; background: #f3f7f5; color: #15332b; }
+    main { max-width: 780px; margin: 6vh auto; padding: 0 20px; }
+    .card { background: white; border: 1px solid #d9e6df; border-radius: 18px;
+      padding: clamp(24px, 5vw, 42px); box-shadow: 0 14px 40px #173b2b12; }
+    .eyebrow { color: #247558; font-weight: 700; letter-spacing: .08em;
+      text-transform: uppercase; font-size: .8rem; }
+    h1 { margin: 12px 0; font-size: clamp(2rem, 5vw, 3rem); line-height: 1.1; }
+    p { line-height: 1.6; color: #486158; }
+    label { display: block; margin: 18px 0 7px; font-weight: 650; }
+    input[type="password"], input[type="file"], input[type="text"] { width: 100%;
+      box-sizing: border-box; padding: 12px; border: 1px solid #bfd1c7;
+      border-radius: 9px; background: white; color: #15332b; }
+    button, a.button { display: inline-block; border: 0; border-radius: 10px;
+      background: #167451; color: white; padding: 12px 18px; font-weight: 700;
+      text-decoration: none; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-top: 22px; }
+    a.secondary, button.secondary { background: #eaf3ee; color: #176247; }
+    .notice { margin: 20px 0; padding: 12px 14px; border-radius: 10px;
+      background: #fff5dc; color: #684f08; line-height: 1.5; }
+    .message { min-height: 1.5em; margin-top: 14px; color: #8b2635; }
+    .message.success { color: #176247; }
+    .fine-print { border-top: 1px solid #e5eee9; margin-top: 24px; padding-top: 18px; font-size: .92rem; }
+    .docs { color: #176247; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <div class="eyebrow">Khammam District · Telangana</div>
+      <h1>PS Attendance Analytics</h1>
+      <p>Upload the daily Gram Panchayat attendance file to generate and download the formatted district report.</p>
+      <div id="storage-warning" class="notice" hidden>
+        Reports are currently stored on temporary service storage. Download each report when it is generated.
+      </div>
+
+      <form id="login-form">
+        <label for="api-token">Access token</label>
+        <input id="api-token" type="password" autocomplete="current-password" required
+          placeholder="Enter the Render APP_API_TOKEN">
+        <div class="actions"><button id="login-button" type="submit">Unlock report upload</button></div>
+        <div id="login-message" class="message" role="status" aria-live="polite"></div>
+      </form>
+
+      <form id="upload-form" hidden>
+        <label for="attendance-file">Attendance file</label>
+        <input id="attendance-file" name="file" type="file" accept=".xls,.xlsx,.csv" required>
+        <label for="requested-by">Submitted by (optional)</label>
+        <input id="requested-by" name="RequestedBy" type="text" maxlength="320"
+          autocomplete="name" placeholder="Name or office">
+        <div class="actions">
+          <button id="generate-button" type="submit">Generate and download PDF</button>
+          <button id="logout-button" class="secondary" type="button">Sign out</button>
+        </div>
+        <div id="report-message" class="message" role="status" aria-live="polite"></div>
+      </form>
+
+      <p class="fine-print">Your access token is exchanged for a short-lived, secure browser session and is not saved in this page. Report API routes remain protected.</p>
+      <a class="docs" href="/docs">Open API documentation</a>
+    </section>
+  </main>
+  <script>
+    (() => {
+      const loginForm = document.getElementById('login-form');
+      const uploadForm = document.getElementById('upload-form');
+      const tokenInput = document.getElementById('api-token');
+      const loginButton = document.getElementById('login-button');
+      const generateButton = document.getElementById('generate-button');
+      const loginMessage = document.getElementById('login-message');
+      const reportMessage = document.getElementById('report-message');
+
+      function showMessage(element, message, success = false) {
+        element.textContent = message;
+        element.classList.toggle('success', success);
+      }
+
+      async function readResponse(response) {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const detail = body.detail;
+          const message = typeof detail === 'string' ? detail : (detail?.message || 'The request failed.');
+          throw new Error(message);
+        }
+        return body;
+      }
+
+      async function apiJson(url, options = {}) {
+        const response = await fetch(url, { credentials: 'same-origin', ...options });
+        return readResponse(response);
+      }
+
+      async function refreshSession() {
+        try {
+          await apiJson('/api/session');
+          loginForm.hidden = true;
+          uploadForm.hidden = false;
+        } catch (_) {
+          uploadForm.hidden = true;
+          loginForm.hidden = false;
+        }
+      }
+
+      async function showStorageMode() {
+        try {
+          const response = await fetch('/health', { credentials: 'same-origin' });
+          const health = await response.json();
+          document.getElementById('storage-warning').hidden =
+            health.storage === 'google_drive' && health.job_tracking === 'google_sheets';
+        } catch (_) { /* Keep the page usable if the optional health hint is unavailable. */ }
+      }
+
+      loginForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        loginButton.disabled = true;
+        showMessage(loginMessage, 'Checking access…');
+        try {
+          await apiJson('/api/session', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ api_token: tokenInput.value })
+          });
+          tokenInput.value = '';
+          showMessage(loginMessage, 'Access granted.', true);
+          await refreshSession();
+        } catch (error) {
+          tokenInput.value = '';
+          showMessage(loginMessage, error.message || 'Could not verify the access token.');
+        } finally {
+          loginButton.disabled = false;
+        }
+      });
+
+      uploadForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const fileInput = document.getElementById('attendance-file');
+        const file = fileInput.files[0];
+        if (!file) return;
+        generateButton.disabled = true;
+        showMessage(reportMessage, 'Uploading and processing the attendance file…');
+        try {
+          const data = new FormData();
+          data.append('file', file);
+          const requestedBy = document.getElementById('requested-by').value.trim();
+          if (requestedBy) data.append('RequestedBy', requestedBy);
+          let job = await apiJson('/api/reports', { method: 'POST', body: data });
+          const jobId = job.job_id;
+          if (!jobId) throw new Error('The service did not return a report job ID.');
+          let attempts = 0;
+          while (job.status === 'Submitted' || job.status === 'Processing') {
+            showMessage(reportMessage, `Report ${job.status.toLowerCase()}…`);
+            if (attempts++ > 180) throw new Error('The report is taking too long. Check the job status in API documentation.');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            job = await apiJson(`/api/reports/${encodeURIComponent(jobId)}`);
+          }
+          if (job.status !== 'Completed') throw new Error(job.notes || 'The report job did not complete.');
+          showMessage(reportMessage, 'Report ready. Downloading PDF…', true);
+          const pdfResponse = await fetch(`/api/reports/${encodeURIComponent(jobId)}/download`, {
+            credentials: 'same-origin'
+          });
+          if (!pdfResponse.ok) await readResponse(pdfResponse);
+          const blob = await pdfResponse.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = objectUrl;
+          link.download = `Khammam_PS_Attendance_Report_${jobId}.pdf`;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+          showMessage(reportMessage, 'Report downloaded. You can upload another file.', true);
+          uploadForm.reset();
+        } catch (error) {
+          if (error.message === 'Authentication required.') await refreshSession();
+          showMessage(reportMessage, error.message || 'Report generation failed.');
+        } finally {
+          generateButton.disabled = false;
+        }
+      });
+
+      document.getElementById('logout-button').addEventListener('click', async () => {
+        try { await apiJson('/api/session', { method: 'DELETE' }); } catch (_) {}
+        await refreshSession();
+      });
+
+      refreshSession();
+      showStorageMode();
+    })();
+  </script>
+</body>
+</html>"""
 
 
 @dataclass(frozen=True)
@@ -184,46 +387,7 @@ def create_app(
 
     @api.get("/", response_class=HTMLResponse, include_in_schema=False)
     def home() -> HTMLResponse:
-        return HTMLResponse(
-            """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Khammam PS Attendance Analytics</title>
-  <style>
-    :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; }
-    body { margin: 0; background: #f3f7f5; color: #15332b; }
-    main { max-width: 760px; margin: 8vh auto; padding: 0 24px; }
-    .card { background: white; border: 1px solid #d9e6df; border-radius: 18px;
-      padding: 36px; box-shadow: 0 14px 40px #173b2b12; }
-    .eyebrow { color: #247558; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .8rem; }
-    h1 { margin: 12px 0; font-size: clamp(2rem, 5vw, 3rem); line-height: 1.1; }
-    p { line-height: 1.65; color: #486158; }
-    .links { display: flex; gap: 12px; flex-wrap: wrap; margin: 26px 0; }
-    a.button { display: inline-block; padding: 12px 18px; border-radius: 10px;
-      background: #167451; color: white; text-decoration: none; font-weight: 700; }
-    a.secondary { background: #eaf3ee; color: #176247; }
-    .note { border-top: 1px solid #e5eee9; padding-top: 18px; font-size: .93rem; }
-    code { background: #eef4f0; padding: 2px 5px; border-radius: 5px; }
-  </style>
-</head>
-<body>
-  <main>
-    <section class="card">
-      <div class="eyebrow">Khammam District · Telangana</div>
-      <h1>PS Attendance Analytics</h1>
-      <p>This service creates daily Gram Panchayat attendance reports and provides the protected API used by the AppSheet workflow.</p>
-      <div class="links">
-        <a class="button" href="/docs">Open API documentation</a>
-        <a class="button secondary" href="/health">Check service health</a>
-      </div>
-      <p class="note">Report endpoints require an <code>x-api-token</code>. Use the AppSheet application for the normal reporting workflow.</p>
-    </section>
-  </main>
-</body>
-</html>"""
-        )
+        return HTMLResponse(UPLOAD_PAGE_HTML)
 
     @api.middleware("http")
     async def limit_content_length(request: Request, call_next: Any) -> Response:
@@ -237,10 +401,68 @@ def create_app(
                     return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header."})
         return await call_next(request)
 
-    def authorize(x_api_token: str | None = Header(default=None)) -> None:
+    def _browser_session_is_valid(request: Request) -> bool:
+        cookie = request.cookies.get(SESSION_COOKIE_NAME, "")
+        try:
+            issued_text, supplied_signature = cookie.split(".", maxsplit=1)
+            issued_at = int(issued_text)
+        except (ValueError, TypeError):
+            return False
+        now = int(time.time())
+        if issued_at > now + 60 or now - issued_at > BROWSER_SESSION_TTL_SECONDS:
+            return False
+        expected_signature = hmac.new(
+            config.api_token.encode("utf-8"), issued_text.encode("ascii"), hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(supplied_signature, expected_signature)
+
+    @api.post("/api/session", include_in_schema=False)
+    async def create_browser_session(request: Request) -> JSONResponse:
         if not config.api_token:
             raise HTTPException(status_code=503, detail="API authentication is not configured.")
-        if not x_api_token or not hmac.compare_digest(x_api_token, config.api_token):
+        try:
+            payload = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Request must contain a JSON access token.") from None
+        supplied_token = payload.get("api_token") if isinstance(payload, dict) else None
+        if not isinstance(supplied_token, str) or not hmac.compare_digest(supplied_token, config.api_token):
+            raise HTTPException(status_code=401, detail="Access token is incorrect.")
+        issued_text = str(int(time.time()))
+        signature = hmac.new(
+            config.api_token.encode("utf-8"), issued_text.encode("ascii"), hashlib.sha256,
+        ).hexdigest()
+        response = JSONResponse({"authenticated": True})
+        response.set_cookie(
+            SESSION_COOKIE_NAME,
+            f"{issued_text}.{signature}",
+            max_age=BROWSER_SESSION_TTL_SECONDS,
+            httponly=True,
+            secure=True,
+            samesite="strict",
+            path="/",
+        )
+        return response
+
+    @api.get("/api/session", include_in_schema=False)
+    def browser_session_status(request: Request) -> dict[str, bool]:
+        if not config.api_token or not _browser_session_is_valid(request):
+            raise HTTPException(status_code=401, detail="Authentication required.")
+        return {"authenticated": True}
+
+    @api.delete("/api/session", include_in_schema=False)
+    def delete_browser_session() -> Response:
+        response = Response(status_code=204)
+        response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="strict")
+        return response
+
+    def authorize(
+        request: Request,
+        x_api_token: str | None = Header(default=None),
+    ) -> None:
+        if not config.api_token:
+            raise HTTPException(status_code=503, detail="API authentication is not configured.")
+        header_is_valid = bool(x_api_token and hmac.compare_digest(x_api_token, config.api_token))
+        if not header_is_valid and not _browser_session_is_valid(request):
             raise HTTPException(status_code=401, detail="Authentication required.")
 
     def _new_record(job_id: str, uploaded_file: str, requested_by: str) -> JobRecord:

@@ -327,7 +327,7 @@ def test_health_is_public_and_unconfigured_auth_fails_closed(tmp_path: Path):
     assert protected.status_code == 503
 
 
-def test_root_page_opens_and_links_to_docs_and_health(tmp_path: Path):
+def test_root_page_opens_with_login_upload_and_download_workflow(tmp_path: Path):
     client = TestClient(create_app(make_settings(tmp_path)))
 
     response = client.get("/")
@@ -335,8 +335,46 @@ def test_root_page_opens_and_links_to_docs_and_health(tmp_path: Path):
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Khammam PS Attendance Analytics" in response.text
+    assert 'id="login-form"' in response.text
+    assert 'id="upload-form"' in response.text
+    assert 'accept=".xls,.xlsx,.csv"' in response.text
+    assert "Generate and download PDF" in response.text
+    assert "/api/reports/" in response.text
     assert 'href="/docs"' in response.text
-    assert 'href="/health"' in response.text
+
+
+def test_browser_session_can_upload_download_and_sign_out(tmp_path: Path):
+    config = make_settings(tmp_path)
+    client = TestClient(create_app(config), base_url="https://testserver")
+
+    assert client.get("/api/session").status_code == 401
+    rejected = client.post("/api/session", json={"api_token": "wrong"})
+    assert rejected.status_code == 401
+
+    login = client.post("/api/session", json={"api_token": config.api_token})
+    assert login.status_code == 200
+    assert login.json() == {"authenticated": True}
+    cookie = login.headers["set-cookie"]
+    assert "httponly" in cookie.lower()
+    assert "secure" in cookie.lower()
+    assert "samesite=strict" in cookie.lower()
+    assert client.get("/api/session").status_code == 200
+
+    upload = client.post(
+        "/api/reports",
+        data={"JobID": "browser-session-job", "RequestedBy": "tester"},
+        files={"file": ("synthetic.xlsx", bytes_for(attendance_rows(), ".xlsx"), "application/octet-stream")},
+    )
+    assert upload.status_code == 200
+    assert upload.json()["status"] == "Completed"
+
+    download = client.get("/api/reports/browser-session-job/download")
+    assert download.status_code == 200
+    assert download.content.startswith(b"%PDF")
+
+    assert client.delete("/api/session").status_code == 204
+    assert client.get("/api/session").status_code == 401
+    assert client.get("/api/reports/browser-session-job").status_code == 401
 
 
 def test_local_tracker_claims_once_and_recovers_a_stale_processing_job(tmp_path: Path):
