@@ -14,7 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from integrations import (
     ALLOWED_EXTENSIONS,
@@ -181,6 +181,49 @@ def create_app(
     api.state.tracker = tracker
     api.state.storage = storage
     api.state.dispatcher = dispatcher
+
+    @api.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def home() -> HTMLResponse:
+        return HTMLResponse(
+            """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Khammam PS Attendance Analytics</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; }
+    body { margin: 0; background: #f3f7f5; color: #15332b; }
+    main { max-width: 760px; margin: 8vh auto; padding: 0 24px; }
+    .card { background: white; border: 1px solid #d9e6df; border-radius: 18px;
+      padding: 36px; box-shadow: 0 14px 40px #173b2b12; }
+    .eyebrow { color: #247558; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .8rem; }
+    h1 { margin: 12px 0; font-size: clamp(2rem, 5vw, 3rem); line-height: 1.1; }
+    p { line-height: 1.65; color: #486158; }
+    .links { display: flex; gap: 12px; flex-wrap: wrap; margin: 26px 0; }
+    a.button { display: inline-block; padding: 12px 18px; border-radius: 10px;
+      background: #167451; color: white; text-decoration: none; font-weight: 700; }
+    a.secondary { background: #eaf3ee; color: #176247; }
+    .note { border-top: 1px solid #e5eee9; padding-top: 18px; font-size: .93rem; }
+    code { background: #eef4f0; padding: 2px 5px; border-radius: 5px; }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="card">
+      <div class="eyebrow">Khammam District · Telangana</div>
+      <h1>PS Attendance Analytics</h1>
+      <p>This service creates daily Gram Panchayat attendance reports and provides the protected API used by the AppSheet workflow.</p>
+      <div class="links">
+        <a class="button" href="/docs">Open API documentation</a>
+        <a class="button secondary" href="/health">Check service health</a>
+      </div>
+      <p class="note">Report endpoints require an <code>x-api-token</code>. Use the AppSheet application for the normal reporting workflow.</p>
+    </section>
+  </main>
+</body>
+</html>"""
+        )
 
     @api.middleware("http")
     async def limit_content_length(request: Request, call_next: Any) -> Response:

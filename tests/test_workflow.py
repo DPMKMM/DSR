@@ -327,6 +327,18 @@ def test_health_is_public_and_unconfigured_auth_fails_closed(tmp_path: Path):
     assert protected.status_code == 503
 
 
+def test_root_page_opens_and_links_to_docs_and_health(tmp_path: Path):
+    client = TestClient(create_app(make_settings(tmp_path)))
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "Khammam PS Attendance Analytics" in response.text
+    assert 'href="/docs"' in response.text
+    assert 'href="/health"' in response.text
+
+
 def test_local_tracker_claims_once_and_recovers_a_stale_processing_job(tmp_path: Path):
     tracker = LocalJobTracker(tmp_path / "jobs.sqlite3")
     tracker.create(JobRecord(
