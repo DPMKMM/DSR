@@ -1,0 +1,30 @@
+# Local Python environments and build output
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+
+# Local settings, credentials, and generated working data
+.env
+.env.*
+!.env.example
+data/
+tmp/
+temp/
+secrets/
+service-account*.json
+*-service-account*.json
+google-service-account*.json
+credentials*.json
+google-credentials*.json
+token.json
+*.pem
+*.p12
+
+# Generated attendance reports
+Khammam_PS_Attendance_Report*.pdf
+Khammam_PS_Attendance_*.pdf
