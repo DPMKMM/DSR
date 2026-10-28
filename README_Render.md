@@ -80,7 +80,14 @@ This service processes requests synchronously unless Cloud Tasks is configured. 
 
 ## Updating the deployment
 
-For the current service, commit and push source changes, then manually deploy the latest commit from the Render Dashboard. If you recreate the service using a Git provider connection and enable auto-deploy, Render can deploy new commits automatically. Do not commit `.env`, API tokens, service-account JSON, uploaded attendance data, or generated PDFs.
+The repository includes `.github/workflows/render-deploy.yml`, which calls the Render deploy hook for application and dependency changes pushed to `main`. To enable it:
+
+1. Regenerate the hook in the Render service's **Settings > Deploy Hook** section because the previous URL was shared in chat.
+2. In GitHub, open **Settings > Secrets and variables > Actions > New repository secret**.
+3. Name the secret `RENDER_DEPLOY_HOOK_URL` and paste the newly generated hook URL as its value.
+4. Save it. Future pushes to `main` that change the application, Docker, or dependency files will trigger a deploy. You can also run the workflow manually from the GitHub Actions tab.
+
+The workflow does not contain the hook URL; it skips safely and warns if the secret has not been configured. Until the secret is added, deploy the latest commit manually from the Render Dashboard. Do not commit `.env`, API tokens, deploy-hook URLs, service-account JSON, uploaded attendance data, or generated PDFs.
 
 ## Local validation
 
