@@ -11,6 +11,8 @@ This repository includes a Render Blueprint (`render.yaml`) for the FastAPI serv
 - Deploy behavior: manual deploys. The service was created from the public repository URL with automatic deploys disabled.
 - Storage status: local filesystem and SQLite until the Google Drive/Sheets settings below are supplied.
 
+The service home page is a direct browser upload form: select an `.xls`, `.xlsx`, or `.csv` attendance file and it generates and downloads the PDF. This page does not ask for the API token. Its browser upload endpoint is intentionally public and applies an in-memory limit of 20 upload attempts per client IP per hour; report status and download are restricted to the short-lived secure cookie issued for that upload. The AppSheet endpoints and the regular `/api/reports` API remain protected by `x-api-token`. Configure private Drive/Sheets storage before using the service for operational records; local Render storage can be cleared on restart or redeploy.
+
 This service was created directly in Render and is not currently managed by syncing `render.yaml`. The Blueprint is a reproducible alternative; do not create another service from it unless you intend to run a second service.
 
 ## 1. Put the project in a private Git repository
@@ -102,4 +104,3 @@ docker run --rm -p 8080:8080 `
 ```
 
 Then open `http://localhost:8080/health`. The Render Docker service uses the same Dockerfile and listens on Render's assigned `PORT`.
-

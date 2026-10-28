@@ -38,8 +38,9 @@ logger = logging.getLogger("khammam_attendance")
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper(), format="%(message)s")
 MAX_UPLOAD_BYTES = 30 * 1024 * 1024
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,100}$")
-SESSION_COOKIE_NAME = "khammam_attendance_session"
-BROWSER_SESSION_TTL_SECONDS = 8 * 60 * 60
+WEB_JOB_COOKIE_NAME = "khammam_web_report"
+WEB_JOB_TTL_SECONDS = 60 * 60
+WEB_UPLOADS_PER_HOUR = 20
 
 UPLOAD_PAGE_HTML = """<!doctype html>
 <html lang="en">
@@ -58,7 +59,7 @@ UPLOAD_PAGE_HTML = """<!doctype html>
     h1 { margin: 12px 0; font-size: clamp(2rem, 5vw, 3rem); line-height: 1.1; }
     p { line-height: 1.6; color: #486158; }
     label { display: block; margin: 18px 0 7px; font-weight: 650; }
-    input[type="password"], input[type="file"], input[type="text"] { width: 100%;
+    input[type="file"], input[type="text"] { width: 100%;
       box-sizing: border-box; padding: 12px; border: 1px solid #bfd1c7;
       border-radius: 9px; background: white; color: #15332b; }
     button, a.button { display: inline-block; border: 0; border-radius: 10px;
@@ -80,44 +81,28 @@ UPLOAD_PAGE_HTML = """<!doctype html>
     <section class="card">
       <div class="eyebrow">Khammam District · Telangana</div>
       <h1>PS Attendance Analytics</h1>
-      <p>Upload the daily Gram Panchayat attendance file to generate and download the formatted district report.</p>
+      <p>Select the latest attendance and DSR Excel file. The service will create your formatted report and download the PDF.</p>
       <div id="storage-warning" class="notice" hidden>
         Reports are currently stored on temporary service storage. Download each report when it is generated.
       </div>
 
-      <form id="login-form">
-        <label for="api-token">Access token</label>
-        <input id="api-token" type="password" autocomplete="current-password" required
-          placeholder="Enter the Render APP_API_TOKEN">
-        <div class="actions"><button id="login-button" type="submit">Unlock report upload</button></div>
-        <div id="login-message" class="message" role="status" aria-live="polite"></div>
-      </form>
-
-      <form id="upload-form" hidden>
-        <label for="attendance-file">Attendance file</label>
+      <form id="upload-form">
+        <label for="attendance-file">Attendance Excel file</label>
         <input id="attendance-file" name="file" type="file" accept=".xls,.xlsx,.csv" required>
-        <label for="requested-by">Submitted by (optional)</label>
+        <label for="requested-by">Your name or office (optional)</label>
         <input id="requested-by" name="RequestedBy" type="text" maxlength="320"
           autocomplete="name" placeholder="Name or office">
-        <div class="actions">
-          <button id="generate-button" type="submit">Generate and download PDF</button>
-          <button id="logout-button" class="secondary" type="button">Sign out</button>
-        </div>
+        <div class="actions"><button id="generate-button" type="submit">Generate and download report</button></div>
         <div id="report-message" class="message" role="status" aria-live="polite"></div>
       </form>
 
-      <p class="fine-print">Your access token is exchanged for a short-lived, secure browser session and is not saved in this page. Report API routes remain protected.</p>
-      <a class="docs" href="/docs">Open API documentation</a>
+      <p class="fine-print">Supported files: Excel (.xls, .xlsx) and CSV. The report downloads automatically when processing finishes.</p>
     </section>
   </main>
   <script>
     (() => {
-      const loginForm = document.getElementById('login-form');
       const uploadForm = document.getElementById('upload-form');
-      const tokenInput = document.getElementById('api-token');
-      const loginButton = document.getElementById('login-button');
       const generateButton = document.getElementById('generate-button');
-      const loginMessage = document.getElementById('login-message');
       const reportMessage = document.getElementById('report-message');
 
       function showMessage(element, message, success = false) {
@@ -140,17 +125,6 @@ UPLOAD_PAGE_HTML = """<!doctype html>
         return readResponse(response);
       }
 
-      async function refreshSession() {
-        try {
-          await apiJson('/api/session');
-          loginForm.hidden = true;
-          uploadForm.hidden = false;
-        } catch (_) {
-          uploadForm.hidden = true;
-          loginForm.hidden = false;
-        }
-      }
-
       async function showStorageMode() {
         try {
           const response = await fetch('/health', { credentials: 'same-origin' });
@@ -159,27 +133,6 @@ UPLOAD_PAGE_HTML = """<!doctype html>
             health.storage === 'google_drive' && health.job_tracking === 'google_sheets';
         } catch (_) { /* Keep the page usable if the optional health hint is unavailable. */ }
       }
-
-      loginForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        loginButton.disabled = true;
-        showMessage(loginMessage, 'Checking access…');
-        try {
-          await apiJson('/api/session', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ api_token: tokenInput.value })
-          });
-          tokenInput.value = '';
-          showMessage(loginMessage, 'Access granted.', true);
-          await refreshSession();
-        } catch (error) {
-          tokenInput.value = '';
-          showMessage(loginMessage, error.message || 'Could not verify the access token.');
-        } finally {
-          loginButton.disabled = false;
-        }
-      });
 
       uploadForm.addEventListener('submit', async (event) => {
         event.preventDefault();
@@ -193,7 +146,7 @@ UPLOAD_PAGE_HTML = """<!doctype html>
           data.append('file', file);
           const requestedBy = document.getElementById('requested-by').value.trim();
           if (requestedBy) data.append('RequestedBy', requestedBy);
-          let job = await apiJson('/api/reports', { method: 'POST', body: data });
+          let job = await apiJson('/api/web/reports', { method: 'POST', body: data });
           const jobId = job.job_id;
           if (!jobId) throw new Error('The service did not return a report job ID.');
           let attempts = 0;
@@ -201,11 +154,11 @@ UPLOAD_PAGE_HTML = """<!doctype html>
             showMessage(reportMessage, `Report ${job.status.toLowerCase()}…`);
             if (attempts++ > 180) throw new Error('The report is taking too long. Check the job status in API documentation.');
             await new Promise(resolve => setTimeout(resolve, 2000));
-            job = await apiJson(`/api/reports/${encodeURIComponent(jobId)}`);
+            job = await apiJson(`/api/web/reports/${encodeURIComponent(jobId)}`);
           }
           if (job.status !== 'Completed') throw new Error(job.notes || 'The report job did not complete.');
           showMessage(reportMessage, 'Report ready. Downloading PDF…', true);
-          const pdfResponse = await fetch(`/api/reports/${encodeURIComponent(jobId)}/download`, {
+          const pdfResponse = await fetch(`/api/web/reports/${encodeURIComponent(jobId)}/download`, {
             credentials: 'same-origin'
           });
           if (!pdfResponse.ok) await readResponse(pdfResponse);
@@ -221,19 +174,12 @@ UPLOAD_PAGE_HTML = """<!doctype html>
           showMessage(reportMessage, 'Report downloaded. You can upload another file.', true);
           uploadForm.reset();
         } catch (error) {
-          if (error.message === 'Authentication required.') await refreshSession();
           showMessage(reportMessage, error.message || 'Report generation failed.');
         } finally {
           generateButton.disabled = false;
         }
       });
 
-      document.getElementById('logout-button').addEventListener('click', async () => {
-        try { await apiJson('/api/session', { method: 'DELETE' }); } catch (_) {}
-        await refreshSession();
-      });
-
-      refreshSession();
       showStorageMode();
     })();
   </script>
@@ -384,6 +330,7 @@ def create_app(
     api.state.tracker = tracker
     api.state.storage = storage
     api.state.dispatcher = dispatcher
+    api.state.web_upload_attempts = {}
 
     @api.get("/", response_class=HTMLResponse, include_in_schema=False)
     def home() -> HTMLResponse:
@@ -391,7 +338,7 @@ def create_app(
 
     @api.middleware("http")
     async def limit_content_length(request: Request, call_next: Any) -> Response:
-        if request.url.path == "/api/reports" and request.method == "POST":
+        if request.url.path in {"/api/reports", "/api/web/reports"} and request.method == "POST":
             raw_length = request.headers.get("content-length")
             if raw_length:
                 try:
@@ -401,69 +348,64 @@ def create_app(
                     return JSONResponse(status_code=400, content={"detail": "Invalid Content-Length header."})
         return await call_next(request)
 
-    def _browser_session_is_valid(request: Request) -> bool:
-        cookie = request.cookies.get(SESSION_COOKIE_NAME, "")
+    def authorize(x_api_token: str | None = Header(default=None)) -> None:
+        if not config.api_token:
+            raise HTTPException(status_code=503, detail="API authentication is not configured.")
+        if not x_api_token or not hmac.compare_digest(x_api_token, config.api_token):
+            raise HTTPException(status_code=401, detail="Authentication required.")
+
+    def _check_web_upload_rate_limit(request: Request) -> None:
+        now = time.monotonic()
+        cutoff = now - 60 * 60
+        attempts_by_ip: dict[str, list[float]] = api.state.web_upload_attempts
+        for address, attempts in list(attempts_by_ip.items()):
+            recent = [attempt for attempt in attempts if attempt > cutoff]
+            if recent:
+                attempts_by_ip[address] = recent
+            else:
+                attempts_by_ip.pop(address, None)
+        address = request.client.host if request.client else "unknown"
+        attempts = attempts_by_ip.setdefault(address, [])
+        if len(attempts) >= WEB_UPLOADS_PER_HOUR:
+            raise HTTPException(
+                status_code=429,
+                detail="Upload limit reached. Please try again later.",
+                headers={"Retry-After": "3600"},
+            )
+        attempts.append(now)
+
+    def _make_web_job_cookie(job_id: str) -> str:
+        issued_at = str(int(time.time()))
+        payload = f"{job_id}.{issued_at}"
+        signature = hmac.new(config.api_token.encode("utf-8"), payload.encode("ascii"), hashlib.sha256).hexdigest()
+        return f"{payload}.{signature}"
+
+    def _web_job_cookie_is_valid(request: Request, job_id: str) -> bool:
+        cookie = request.cookies.get(WEB_JOB_COOKIE_NAME, "")
         try:
-            issued_text, supplied_signature = cookie.split(".", maxsplit=1)
+            cookie_job_id, issued_text, supplied_signature = cookie.split(".", maxsplit=2)
             issued_at = int(issued_text)
         except (ValueError, TypeError):
             return False
         now = int(time.time())
-        if issued_at > now + 60 or now - issued_at > BROWSER_SESSION_TTL_SECONDS:
+        if cookie_job_id != job_id or issued_at > now + 60 or now - issued_at > WEB_JOB_TTL_SECONDS:
             return False
+        payload = f"{cookie_job_id}.{issued_text}"
         expected_signature = hmac.new(
-            config.api_token.encode("utf-8"), issued_text.encode("ascii"), hashlib.sha256,
+            config.api_token.encode("utf-8"), payload.encode("ascii"), hashlib.sha256,
         ).hexdigest()
         return hmac.compare_digest(supplied_signature, expected_signature)
 
-    @api.post("/api/session", include_in_schema=False)
-    async def create_browser_session(request: Request) -> JSONResponse:
+    def _get_web_job(job_id: str, request: Request) -> JobRecord:
+        stable_id = _validate_job_id(job_id)
         if not config.api_token:
-            raise HTTPException(status_code=503, detail="API authentication is not configured.")
-        try:
-            payload = await request.json()
-        except Exception:
-            raise HTTPException(status_code=400, detail="Request must contain a JSON access token.") from None
-        supplied_token = payload.get("api_token") if isinstance(payload, dict) else None
-        if not isinstance(supplied_token, str) or not hmac.compare_digest(supplied_token, config.api_token):
-            raise HTTPException(status_code=401, detail="Access token is incorrect.")
-        issued_text = str(int(time.time()))
-        signature = hmac.new(
-            config.api_token.encode("utf-8"), issued_text.encode("ascii"), hashlib.sha256,
-        ).hexdigest()
-        response = JSONResponse({"authenticated": True})
-        response.set_cookie(
-            SESSION_COOKIE_NAME,
-            f"{issued_text}.{signature}",
-            max_age=BROWSER_SESSION_TTL_SECONDS,
-            httponly=True,
-            secure=True,
-            samesite="strict",
-            path="/",
-        )
-        return response
-
-    @api.get("/api/session", include_in_schema=False)
-    def browser_session_status(request: Request) -> dict[str, bool]:
-        if not config.api_token or not _browser_session_is_valid(request):
-            raise HTTPException(status_code=401, detail="Authentication required.")
-        return {"authenticated": True}
-
-    @api.delete("/api/session", include_in_schema=False)
-    def delete_browser_session() -> Response:
-        response = Response(status_code=204)
-        response.delete_cookie(SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="strict")
-        return response
-
-    def authorize(
-        request: Request,
-        x_api_token: str | None = Header(default=None),
-    ) -> None:
-        if not config.api_token:
-            raise HTTPException(status_code=503, detail="API authentication is not configured.")
-        header_is_valid = bool(x_api_token and hmac.compare_digest(x_api_token, config.api_token))
-        if not header_is_valid and not _browser_session_is_valid(request):
-            raise HTTPException(status_code=401, detail="Authentication required.")
+            raise HTTPException(status_code=503, detail="Report access is not configured.")
+        if not _web_job_cookie_is_valid(request, stable_id):
+            raise HTTPException(status_code=401, detail="This report session is invalid or expired.")
+        record = tracker.get(stable_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Report job was not found.")
+        return record
 
     def _new_record(job_id: str, uploaded_file: str, requested_by: str) -> JobRecord:
         return JobRecord(
@@ -571,6 +513,54 @@ def create_app(
             "job_tracking": "google_sheets" if config.spreadsheet_id else "local_sqlite",
             "queued_processing": config.tasks_enabled,
         }
+
+    @api.post("/api/web/reports", status_code=200, include_in_schema=False)
+    def create_web_report(
+        request: Request,
+        file: UploadFile = File(...),
+        requested_by: str = Form(default="", alias="RequestedBy"),
+    ) -> JSONResponse:
+        if not config.api_token:
+            raise HTTPException(status_code=503, detail="Report access is not configured.")
+        _check_web_upload_rate_limit(request)
+        filename = _clean_filename(file.filename)
+        if Path(filename).suffix.lower() not in ALLOWED_EXTENSIONS:
+            raise HTTPException(status_code=415, detail="Allowed file types are .xls, .xlsx, and .csv.")
+        raw = _read_upload(file, config.max_upload_bytes)
+        job_id = uuid4().hex
+        record, _ = tracker.create(_new_record(job_id, filename, requested_by))
+        completed_or_queued = _enqueue_or_process(record, source=(filename, raw))
+        response = JSONResponse(completed_or_queued.public_dict())
+        response.set_cookie(
+            WEB_JOB_COOKIE_NAME,
+            _make_web_job_cookie(job_id),
+            max_age=WEB_JOB_TTL_SECONDS,
+            httponly=True,
+            secure=request.url.scheme == "https",
+            samesite="strict",
+            path="/api/web/reports",
+        )
+        return response
+
+    @api.get("/api/web/reports/{job_id}", include_in_schema=False)
+    def get_web_report(job_id: str, request: Request) -> dict[str, Any]:
+        return _get_web_job(job_id, request).public_dict()
+
+    @api.get("/api/web/reports/{job_id}/download", include_in_schema=False)
+    def download_web_report(job_id: str, request: Request) -> Response:
+        record = _get_web_job(job_id, request)
+        if record.status != "Completed" or not record.output_pdf:
+            raise HTTPException(status_code=409, detail=f"Report is not ready (status: {record.status}).")
+        try:
+            pdf_bytes = storage.read_pdf(record.output_pdf, record.local_pdf_path)
+        except Exception as exc:
+            status_code, message = _safe_error(exc)
+            raise HTTPException(status_code=status_code, detail=message) from None
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={"Content-Disposition": 'attachment; filename="Khammam_PS_Attendance_Report.pdf"'},
+        )
 
     @api.post("/api/reports", status_code=200, dependencies=[Depends(authorize)])
     def create_report(

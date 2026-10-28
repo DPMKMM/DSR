@@ -327,7 +327,7 @@ def test_health_is_public_and_unconfigured_auth_fails_closed(tmp_path: Path):
     assert protected.status_code == 503
 
 
-def test_root_page_opens_with_login_upload_and_download_workflow(tmp_path: Path):
+def test_root_page_opens_directly_with_upload_and_download_workflow(tmp_path: Path):
     client = TestClient(create_app(make_settings(tmp_path)))
 
     response = client.get("/")
@@ -335,46 +335,53 @@ def test_root_page_opens_with_login_upload_and_download_workflow(tmp_path: Path)
     assert response.status_code == 200
     assert "text/html" in response.headers["content-type"]
     assert "Khammam PS Attendance Analytics" in response.text
-    assert 'id="login-form"' in response.text
+    assert 'id="login-form"' not in response.text
+    assert "APP_API_TOKEN" not in response.text
     assert 'id="upload-form"' in response.text
     assert 'accept=".xls,.xlsx,.csv"' in response.text
-    assert "Generate and download PDF" in response.text
-    assert "/api/reports/" in response.text
-    assert 'href="/docs"' in response.text
+    assert "Generate and download report" in response.text
+    assert "/api/web/reports/" in response.text
 
 
-def test_browser_session_can_upload_download_and_sign_out(tmp_path: Path):
+def test_public_web_upload_download_works_without_token_and_keeps_job_private(tmp_path: Path):
     config = make_settings(tmp_path)
     client = TestClient(create_app(config), base_url="https://testserver")
 
-    assert client.get("/api/session").status_code == 401
-    rejected = client.post("/api/session", json={"api_token": "wrong"})
-    assert rejected.status_code == 401
-
-    login = client.post("/api/session", json={"api_token": config.api_token})
-    assert login.status_code == 200
-    assert login.json() == {"authenticated": True}
-    cookie = login.headers["set-cookie"]
-    assert "httponly" in cookie.lower()
-    assert "secure" in cookie.lower()
-    assert "samesite=strict" in cookie.lower()
-    assert client.get("/api/session").status_code == 200
-
     upload = client.post(
-        "/api/reports",
-        data={"JobID": "browser-session-job", "RequestedBy": "tester"},
+        "/api/web/reports",
+        data={"RequestedBy": "tester"},
         files={"file": ("synthetic.xlsx", bytes_for(attendance_rows(), ".xlsx"), "application/octet-stream")},
     )
     assert upload.status_code == 200
+    job_id = upload.json()["job_id"]
     assert upload.json()["status"] == "Completed"
+    cookie = upload.headers["set-cookie"]
+    assert "httponly" in cookie.lower()
+    assert "secure" in cookie.lower()
+    assert "samesite=strict" in cookie.lower()
+    assert client.get(f"/api/web/reports/{job_id}").status_code == 200
 
-    download = client.get("/api/reports/browser-session-job/download")
+    download = client.get(f"/api/web/reports/{job_id}/download")
     assert download.status_code == 200
     assert download.content.startswith(b"%PDF")
 
-    assert client.delete("/api/session").status_code == 204
-    assert client.get("/api/session").status_code == 401
-    assert client.get("/api/reports/browser-session-job").status_code == 401
+    other_client = TestClient(create_app(make_settings(tmp_path / "other")), base_url="https://testserver")
+    assert other_client.get(f"/api/web/reports/{job_id}").status_code == 401
+    assert other_client.get(f"/api/web/reports/{job_id}/download").status_code == 401
+    assert client.get(f"/api/reports/{job_id}").status_code == 401
+
+
+def test_public_web_upload_endpoint_limits_requests_by_client(tmp_path: Path):
+    client = TestClient(create_app(make_settings(tmp_path)))
+    invalid_upload = {
+        "files": {"file": ("not-allowed.exe", b"no executable", "application/octet-stream")},
+    }
+
+    for _ in range(app_module.WEB_UPLOADS_PER_HOUR):
+        assert client.post("/api/web/reports", **invalid_upload).status_code == 415
+    limited = client.post("/api/web/reports", **invalid_upload)
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"] == "3600"
 
 
 def test_local_tracker_claims_once_and_recovers_a_stale_processing_job(tmp_path: Path):
