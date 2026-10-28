@@ -4,12 +4,15 @@ This repository includes a Render Blueprint (`render.yaml`) for the FastAPI serv
 
 ## Current deployment
 
-- Service: [khammam-ps-attendance-api](https://khammam-ps-attendance-api.onrender.com)
+- Service name: `kmmdsr`
+- Current public URL: [khammam-ps-attendance-api.onrender.com](https://khammam-ps-attendance-api.onrender.com)
 - Render Dashboard: <https://dashboard.render.com/web/srv-dbh2l6kipgvc73djn3l0>
 - Plan/region: Free, Singapore
 - Source: `https://github.com/DPMKMM/DSR`
 - Deploy behavior: manual deploys. The service was created from the public repository URL with automatic deploys disabled.
 - Storage status: local filesystem and SQLite until the Google Drive/Sheets settings below are supplied.
+
+The Render dashboard service name is now `kmmdsr`. Render retained the original `khammam-ps-attendance-api.onrender.com` hostname after the rename, so that remains the working public URL. The service's `onrender.com` hostname is not editable in the existing service settings.
 
 The service home page is a direct browser upload form: select an `.xls`, `.xlsx`, or `.csv` attendance file and it generates and downloads the PDF. Download names use the attendance date from the spreadsheet and the upload time in India Standard Time, in `PS_Attendance_Report_YYYY-MM-DD_HH-MM-SS.pdf` format. This page does not ask for the API token. Its browser upload endpoint is intentionally public and applies an in-memory limit of 20 upload attempts per client IP per hour; report status and download are restricted to the short-lived secure cookie issued for that upload. The AppSheet endpoints and the regular `/api/reports` API remain protected by `x-api-token`. Configure private Drive/Sheets storage before using the service for operational records; local Render storage can be cleared on restart or redeploy.
 

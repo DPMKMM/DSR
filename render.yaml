@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: khammam-ps-attendance-api
+    name: kmmdsr
     runtime: docker
     region: singapore
     plan: free
