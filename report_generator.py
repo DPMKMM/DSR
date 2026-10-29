@@ -663,12 +663,6 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
     ])
     story.append(make_table(abstract_headers, abstract_rows, widths, left_columns=(1,), total_row=True))
     story.append(Spacer(1, 6))
-    story.append(Paragraph(
-        "Method: A nonblank attendance status counts as submitted. Attendance at or before 09:00 counts "
-        "as before 9 AM; after 09:00 counts as after 9 AM. Pending means the status is blank. "
-        "Overall Attendance % is all GPs with a nonblank first attendance status divided by all GPs. "
-        "All totals use one record per nonblank Panchayat LGD code.", styles["Note"],
-    ))
     if report.duplicate_lgd_rows:
         story.append(Paragraph(
             f"Validation: Excluded {report.duplicate_lgd_rows} duplicate LGD row(s).", styles["Note"],
@@ -690,7 +684,7 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
         ))
 
     story.append(PageBreak())
-    story.append(Paragraph("2. Prepare DSR Report", styles["SectionTitle"]))
+    story.append(Paragraph("2. Mandal-wise DSR Abstract Report", styles["SectionTitle"]))
     dsr_headers = [
         "Sl. No.", "Mandal", "Total No. of GPs", "No. of PS present",
         "No. of GPs DSR entered", "% GPs DSR submitted",
@@ -709,13 +703,6 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
         dsr_total["dsr_entered"], PercentBar(dsr_total["dsr_pct"], dsr_widths[5] - 5),
     ])
     story.append(make_table(dsr_headers, dsr_rows, dsr_widths, left_columns=(1,), total_row=True))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph(
-        "Method: A GP is eligible for DSR only when First Attendence Status or Second Attendence Status "
-        "is Present. Meeting, Training, Leave, and other non-Present statuses are excluded. DSR % is "
-        "calculated as entered DSRs divided by eligible PS present. Each GP is counted once by LGD code.",
-        styles["Note"],
-    ))
 
     def append_list_section(title: str, total_label: str, rows: list[dict[str, Any]]) -> None:
         story.append(PageBreak())
@@ -746,7 +733,7 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
     story.append(PageBreak())
     story.append(Paragraph("7. DSR PENDING GPs LIST", styles["SectionTitle"]))
     story.append(Paragraph(
-        f"Total eligible GPs with DSR pending: {len(report.dsr_pending_rows):,}",
+        f"DSR Pending GPs: {len(report.dsr_pending_rows):,}",
         styles["ReportSubtitle"],
     ))
     dsr_pending_headers = [

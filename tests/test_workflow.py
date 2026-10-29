@@ -207,12 +207,15 @@ def test_empty_sections_are_rendered_and_district_totals_remain_correct(tmp_path
     pdf_path = generate_pdf(report, tmp_path / "empty-sections.pdf")
     reader = PdfReader(str(pdf_path))
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    normalized_text = " ".join(text.split())
     assert "KHAMMAM DISTRICT" in text
     assert text.count("No records found for this section.") == 4
     assert "No eligible GPs have pending DSR." in text
-    assert "Overall Attendance %" in text
-    assert "Prepare DSR Report" in text
+    assert "Overall Attendance %" in normalized_text
+    assert "Mandal-wise DSR Abstract Report" in text
     assert "% GPs DSR submitted" in text
+    assert "DSR Pending GPs: 0" in text
+    assert "Method:" not in text
     assert "DISTRICT TOTAL" in text
 
 
@@ -224,9 +227,10 @@ def test_pdf_generation_includes_all_report_section_titles(tmp_path: Path):
     assert float(reader.pages[0].mediabox.width) == pytest.approx(595.28, abs=0.1)
     assert float(reader.pages[0].mediabox.height) == pytest.approx(841.89, abs=0.1)
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    normalized_text = " ".join(text.split())
     assert "Mandal-wise Attendance Abstract" in text
-    assert "Overall Attendance %" in text
-    assert "Prepare DSR Report" in text
+    assert "Overall Attendance %" in normalized_text
+    assert "Mandal-wise DSR Abstract Report" in text
     assert "No. of PS present" in text
     assert "No. of GPs DSR entered" in text
     assert "% GPs DSR submitted" in text
@@ -235,6 +239,8 @@ def test_pdf_generation_includes_all_report_section_titles(tmp_path: Path):
     assert "TRAINING / MEETING LIST" in text
     assert "AFTER 9 AM" in text
     assert "DSR PENDING GPs LIST" in text
+    assert "DSR Pending GPs:" in text
+    assert "Method:" not in text
     assert "GP Seven Conflict" in text or "conflicting names" in text
 
 
