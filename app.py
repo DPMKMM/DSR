@@ -90,7 +90,7 @@ UPLOAD_PAGE_HTML = """<!doctype html>
 
       <form id="upload-form">
         <label for="attendance-file">Attendance Excel file</label>
-        <input id="attendance-file" name="file" type="file" accept=".xls,.xlsx,.csv" required>
+        <input id="attendance-file" name="file" type="file" required>
         <label for="requested-by">Your name or office (optional)</label>
         <input id="requested-by" name="RequestedBy" type="text" maxlength="320"
           autocomplete="name" placeholder="Name or office">
@@ -98,7 +98,7 @@ UPLOAD_PAGE_HTML = """<!doctype html>
         <div id="report-message" class="message" role="status" aria-live="polite"></div>
       </form>
 
-      <p class="fine-print">Supported files: Excel (.xls, .xlsx) and CSV. The report downloads automatically when processing finishes.</p>
+      <p class="fine-print">Choose a file from your device. Supported report data: Excel (.xls, .xlsx), CSV, or an HTML table saved as .xls. The report downloads automatically when processing finishes.</p>
     </section>
   </main>
   <script>
