@@ -10,7 +10,7 @@ from pypdf import PdfReader
 
 import app as app_module
 from app import Settings, create_app
-from integrations import JobRecord, LocalJobTracker, LocalStorage, utc_now
+from integrations import JobRecord, LocalJobTracker, utc_now
 from report_generator import InputValidationError, analyze_attendance, generate_pdf, process_attendance_file
 
 
@@ -49,23 +49,10 @@ def bytes_for(frame: pd.DataFrame, extension: str) -> bytes:
 
 def make_settings(tmp_path: Path) -> Settings:
     return Settings(
-        api_token="test-only-token-value-that-is-at-least-32-chars",
+        session_secret="test-only-session-secret-value-at-least-32-characters",
         data_dir=tmp_path / "data",
-        local_input_dir=None,
         max_upload_bytes=30 * 1024 * 1024,
-        credentials_path="",
-        drive_upload_folder_id="",
-        drive_output_folder_id="",
-        spreadsheet_id="",
-        spreadsheet_tab="AttendanceReportJobs",
-        tasks_project="",
-        tasks_location="",
-        tasks_queue="",
-        public_base_url="",
-        task_invoker_service_account="",
     )
-
-
 def test_valid_xlsx_generates_unique_mandal_abstract_and_categories():
     report = process_attendance_file("synthetic.xlsx", bytes_for(attendance_rows(), ".xlsx"))
 
@@ -203,12 +190,12 @@ def test_mandal_abstract_repeats_column_headers_when_continued(tmp_path: Path):
     assert "No. of GPs" in page_two
 
 
-def test_api_upload_status_download_auth_and_duplicate_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_web_upload_processes_synchronously_and_downloads_private_pdf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
     config = make_settings(tmp_path)
-    api = create_app(config)
-    client = TestClient(api)
+    client = TestClient(create_app(config), base_url="https://testserver")
     monkeypatch.setattr(app_module, "utc_now", lambda: "2026-10-28T03:04:05+00:00")
-    token = {"x-api-token": config.api_token}
     workbook = bytes_for(attendance_rows(), ".xlsx")
     calls = 0
     real_process = app_module.process_attendance_file
@@ -219,21 +206,20 @@ def test_api_upload_status_download_auth_and_duplicate_job(tmp_path: Path, monke
         return real_process(filename, contents)
 
     monkeypatch.setattr(app_module, "process_attendance_file", count_process)
-    response = client.post(
-        "/api/reports",
-        headers=token,
-        data={"JobID": "job-test-001", "RequestedBy": "tester@example.org"},
+    upload = client.post(
+        "/api/web/reports",
+        data={"RequestedBy": "tester"},
         files={"file": ("synthetic.xlsx", workbook, "application/octet-stream")},
     )
-    assert response.status_code == 200
-    assert response.json()["status"] == "Completed"
-    assert response.json()["job_id"] == "job-test-001"
+    assert upload.status_code == 200
+    assert upload.json()["status"] == "Completed"
+    job_id = upload.json()["job_id"]
     assert calls == 1
 
-    status = client.get("/api/reports/job-test-001", headers=token)
+    status = client.get(f"/api/web/reports/{job_id}")
     assert status.status_code == 200
     assert status.json()["status"] == "Completed"
-    download = client.get("/api/reports/job-test-001/download", headers=token)
+    download = client.get(f"/api/web/reports/{job_id}/download")
     assert download.status_code == 200
     assert download.headers["content-type"] == "application/pdf"
     assert download.headers["content-disposition"] == (
@@ -241,95 +227,45 @@ def test_api_upload_status_download_auth_and_duplicate_job(tmp_path: Path, monke
     )
     assert download.content.startswith(b"%PDF")
     assert (config.data_dir / "reports" / "PS_Attendance_Report_2026-10-28_08-34-05.pdf").is_file()
-
-    duplicate = client.post(
-        "/api/reports",
-        headers=token,
-        data={"JobID": "job-test-001", "RequestedBy": "tester@example.org"},
-        files={"file": ("synthetic.xlsx", b"not an xlsx", "application/octet-stream")},
-    )
-    assert duplicate.status_code == 200
-    assert duplicate.json()["status"] == "Completed"
-    assert calls == 1
-
-    assert client.get("/api/reports/job-test-001").status_code == 401
-    assert client.get("/api/reports/job-test-001/download", headers={"x-api-token": "wrong"}).status_code == 401
-    unauthorized_upload = client.post(
-        "/api/reports", data={"JobID": "unauthorized"},
-        files={"file": ("synthetic.xlsx", workbook, "application/octet-stream")},
-    )
-    assert unauthorized_upload.status_code == 401
+    assert client.get(f"/api/reports/{job_id}").status_code == 404
+    assert client.get("/docs").status_code == 404
 
 
-def test_api_rejects_invalid_types_and_reports_missing_columns(tmp_path: Path):
-    config = make_settings(tmp_path)
-    client = TestClient(create_app(config))
-    token = {"x-api-token": config.api_token}
+def test_web_upload_rejects_invalid_types_and_missing_columns(tmp_path: Path):
+    client = TestClient(create_app(make_settings(tmp_path)))
 
     invalid_type = client.post(
-        "/api/reports", headers=token, data={"JobID": "bad-type"},
+        "/api/web/reports",
         files={"file": ("payload.exe", b"data", "application/octet-stream")},
     )
     assert invalid_type.status_code == 415
 
     bad_csv = b"Mandal,GP\nA,One\n"
     missing = client.post(
-        "/api/reports", headers=token, data={"JobID": "bad-columns"},
+        "/api/web/reports",
         files={"file": ("bad.csv", bad_csv, "text/csv")},
     )
     assert missing.status_code == 422
     assert "Required column(s) not found" in missing.json()["detail"]["message"]
-    assert missing.json()["detail"]["job_id"] == "bad-columns"
+    assert missing.json()["detail"]["job_id"]
 
 
-def test_appsheet_submitted_sheet_row_is_claimed_and_processed(tmp_path: Path):
+def test_health_and_web_upload_configuration(tmp_path: Path):
     config = make_settings(tmp_path)
-    tracker = LocalJobTracker(config.data_dir / "attendance_jobs.sqlite3")
-    storage = LocalStorage(config.data_dir)
-    source_path = storage.input_dir / "attendance.xlsx"
-    source_path.write_bytes(bytes_for(attendance_rows().iloc[:2], ".xlsx"))
-    tracker.create(JobRecord(
-        job_id="appsheet-job-1",
-        uploaded_file="attendance.xlsx",
-        requested_by="tester@example.org",
-        requested_at=utc_now(),
-        status="Submitted",
-    ))
-
-    client = TestClient(create_app(config, tracker=tracker, storage=storage))
-    response = client.post(
-        "/api/reports/from-drive",
-        headers={"x-api-token": config.api_token},
-        json={
-            "JobID": "appsheet-job-1",
-            "UploadedFile": "AttendanceUploads/attendance.xlsx",
-            "RequestedBy": "tester@example.org",
-        },
+    client = TestClient(create_app(Settings(
+        session_secret="",
+        data_dir=config.data_dir,
+        max_upload_bytes=config.max_upload_bytes,
+    )))
+    health = client.get("/health")
+    assert health.status_code == 200
+    assert health.json()["storage"] == "local"
+    assert health.json()["job_tracking"] == "local_sqlite"
+    unavailable = client.post(
+        "/api/web/reports",
+        files={"file": ("synthetic.xlsx", bytes_for(attendance_rows(), ".xlsx"), "application/octet-stream")},
     )
-    assert response.status_code == 200
-    assert response.json()["status"] == "Completed"
-    assert tracker.get("appsheet-job-1").status == "Completed"
-
-
-def test_from_drive_requires_stable_appsheet_job_id(tmp_path: Path):
-    config = make_settings(tmp_path)
-    client = TestClient(create_app(config))
-    response = client.post(
-        "/api/reports/from-drive",
-        headers={"x-api-token": config.api_token},
-        json={"UploadedFile": "attendance.xlsx"},
-    )
-    assert response.status_code == 400
-    assert "JobID" in response.json()["detail"]
-
-
-def test_health_is_public_and_unconfigured_auth_fails_closed(tmp_path: Path):
-    config = make_settings(tmp_path)
-    config = Settings(**{**config.__dict__, "api_token": ""})
-    client = TestClient(create_app(config))
-    assert client.get("/health").status_code == 200
-    protected = client.get("/api/reports/missing")
-    assert protected.status_code == 503
+    assert unavailable.status_code == 503
 
 
 def test_root_page_opens_directly_with_upload_and_download_workflow(tmp_path: Path):
@@ -342,6 +278,9 @@ def test_root_page_opens_directly_with_upload_and_download_workflow(tmp_path: Pa
     assert "Khammam PS Attendance Analytics" in response.text
     assert 'id="login-form"' not in response.text
     assert "APP_API_TOKEN" not in response.text
+    assert "AppSheet" not in response.text
+    assert "google" not in response.text.lower()
+    assert "API documentation" not in response.text
     assert 'id="upload-form"' in response.text
     assert 'id="attendance-file" name="file" type="file" required' in response.text
     assert 'accept=' not in response.text
@@ -353,7 +292,7 @@ def test_root_page_opens_directly_with_upload_and_download_workflow(tmp_path: Pa
     assert "Khammam_PS_Attendance_Report_${jobId}" not in response.text
 
 
-def test_public_web_upload_download_works_without_token_and_keeps_job_private(
+def test_public_web_upload_download_uses_private_browser_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
     config = make_settings(tmp_path)
@@ -384,7 +323,7 @@ def test_public_web_upload_download_works_without_token_and_keeps_job_private(
     other_client = TestClient(create_app(make_settings(tmp_path / "other")), base_url="https://testserver")
     assert other_client.get(f"/api/web/reports/{job_id}").status_code == 401
     assert other_client.get(f"/api/web/reports/{job_id}/download").status_code == 401
-    assert client.get(f"/api/reports/{job_id}").status_code == 401
+    assert client.get(f"/api/reports/{job_id}").status_code == 404
 
 
 def test_public_web_upload_endpoint_limits_requests_by_client(tmp_path: Path):

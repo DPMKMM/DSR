@@ -9,13 +9,9 @@ services:
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:
-      - key: APP_API_TOKEN
+      - key: WEB_SESSION_SECRET
         generateValue: true
       - key: DATA_DIR
         value: /tmp/khammam-attendance-data
       - key: MAX_UPLOAD_BYTES
         value: "31457280"
-      - key: SHEETS_JOBS_TAB
-        value: AttendanceReportJobs
-      - key: GOOGLE_APPLICATION_CREDENTIALS
-        value: /etc/secrets/google-service-account.json
