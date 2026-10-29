@@ -17,21 +17,29 @@ from report_generator import InputValidationError, analyze_attendance, generate_
 def attendance_rows() -> pd.DataFrame:
     return pd.DataFrame([
         {"Panchayat LGD": 1, "Mandal Name": "Mandal A", "Panchayat Name": "GP One",
-         "First Attendence Status": "Present", "First Attendence Datetime": "28-10-2026 09:00"},
+         "First Attendence Status": "Present", "Second Attendence Status": "",
+         "First Attendence Datetime": "28-10-2026 09:00", "DSR Entry Status": "Submitted"},
         {"Panchayat LGD": 2, "Mandal Name": "Mandal A", "Panchayat Name": "GP Two",
-         "First Attendence Status": "Present", "First Attendence Datetime": "28-10-2026 08:59"},
+         "First Attendence Status": "Present", "Second Attendence Status": "",
+         "First Attendence Datetime": "28-10-2026 08:59", "DSR Entry Status": "Submitted"},
         {"Panchayat LGD": 3, "Mandal Name": "Mandal A", "Panchayat Name": "GP Three",
-         "First Attendence Status": "Present", "First Attendence Datetime": "28-10-2026 09:01"},
+         "First Attendence Status": "Present", "Second Attendence Status": "",
+         "First Attendence Datetime": "28-10-2026 09:01", "DSR Entry Status": "Pending"},
         {"Panchayat LGD": 4, "Mandal Name": "Mandal B", "Panchayat Name": "GP Four",
-         "First Attendence Status": "", "First Attendence Datetime": ""},
+         "First Attendence Status": "", "Second Attendence Status": "",
+         "First Attendence Datetime": "", "DSR Entry Status": ""},
         {"Panchayat LGD": 5, "Mandal Name": "Mandal B", "Panchayat Name": "GP Five",
-         "First Attendence Status": "On Leave", "First Attendence Datetime": "28-10-2026 08:30"},
+         "First Attendence Status": "On Leave", "Second Attendence Status": "",
+         "First Attendence Datetime": "28-10-2026 08:30", "DSR Entry Status": "Submitted"},
         {"Panchayat LGD": 6, "Mandal Name": "Mandal B", "Panchayat Name": "GP Six",
-         "First Attendence Status": "Training", "First Attendence Datetime": "28-10-2026 09:05"},
+         "First Attendence Status": "Training", "Second Attendence Status": "",
+         "First Attendence Datetime": "28-10-2026 09:05", "DSR Entry Status": "Submitted"},
         {"Panchayat LGD": 7, "Mandal Name": "Mandal B", "Panchayat Name": "GP Seven",
-         "First Attendence Status": "", "First Attendence Datetime": ""},
+         "First Attendence Status": "", "Second Attendence Status": "",
+         "First Attendence Datetime": "", "DSR Entry Status": ""},
         {"Panchayat LGD": 7, "Mandal Name": "Mandal C", "Panchayat Name": "GP Seven Conflict",
-         "First Attendence Status": "Meeting", "First Attendence Datetime": "28-10-2026 09:00"},
+         "First Attendence Status": "Meeting", "Second Attendence Status": "",
+         "First Attendence Datetime": "28-10-2026 09:00", "DSR Entry Status": "Submitted"},
     ])
 
 
@@ -63,15 +71,24 @@ def test_valid_xlsx_generates_unique_mandal_abstract_and_categories():
     assert report.conflicts[0]["mandals"] == ["Mandal B", "Mandal C"]
     assert report.totals == {
         "unique_gps": 7,
+        "attendance_submitted": 6,
+        "overall_attendance_pct": pytest.approx(6 / 7 * 100),
         "before_9": 4,
         "on_leave": 1,
         "meeting_training": 2,
         "pending": 1,
         "after_9": 2,
+        "dsr_eligible": 3,
+        "dsr_entered": 2,
+        "dsr_pending": 1,
     }
     assert [row["mandal"] for row in report.mandal_rows] == ["Mandal B", "Mandal A"]
     assert report.district_total["before_9_pct"] == pytest.approx(4 / 7 * 100)
+    assert report.district_total["attendance_pct"] == pytest.approx(6 / 7 * 100)
     assert report.mandal_rows[0]["before_9_pct"] == 50
+    assert report.mandal_rows[0]["attendance_pct"] == 75
+    assert report.dsr_district_total["dsr_pct"] == pytest.approx(2 / 3 * 100)
+    assert report.dsr_pending_rows[0]["gp"] == "GP Three"
 
 
 def test_csv_with_header_variations_is_supported():
@@ -80,6 +97,8 @@ def test_csv_with_header_variations_is_supported():
         "Mandal Name": "MANDAL NAME",
         "First Attendence Status": "First Attendance Status",
         "First Attendence Datetime": "First Attendance Date Time",
+        "Second Attendence Status": "Second Attendance Status",
+        "DSR Entry Status": "DSR Status",
     })
     report = process_attendance_file("synthetic.csv", bytes_for(frame, ".csv"))
     assert report.unique_gp_count == 1
@@ -110,6 +129,12 @@ def test_missing_required_columns_return_a_useful_error():
     assert "First Attendence Datetime" in str(error.value)
 
 
+def test_missing_dsr_submission_column_returns_a_useful_error():
+    frame = attendance_rows().drop(columns=["DSR Entry Status"])
+    with pytest.raises(InputValidationError, match="DSR submission column was not found"):
+        analyze_attendance(frame)
+
+
 def test_duplicate_lgd_prefers_a_nonblank_status_and_flags_conflicting_names():
     report = analyze_attendance(attendance_rows())
     assert report.unique_gp_count == 7
@@ -133,22 +158,61 @@ def test_time_boundary_blank_leave_meeting_training_and_after_nine_rules():
     assert all(row["status"] for row in report.leave_rows + report.meeting_training_rows)
 
 
+def test_dsr_requires_present_on_first_or_second_attendance_and_excludes_other_statuses():
+    frame = pd.DataFrame([
+        {"Panchayat LGD": 1, "Mandal Name": "A", "Panchayat Name": "GP1",
+         "First Attendence Status": "Present", "Second Attendence Status": "",
+         "First Attendence Datetime": "28-10-2026 08:00", "DSR Entry Status": "Submitted"},
+        {"Panchayat LGD": 2, "Mandal Name": "A", "Panchayat Name": "GP2",
+         "First Attendence Status": "On Leave", "Second Attendence Status": "Present",
+         "First Attendence Datetime": "28-10-2026 08:00", "DSR Entry Status": "Pending"},
+        {"Panchayat LGD": 3, "Mandal Name": "A", "Panchayat Name": "GP3",
+         "First Attendence Status": "Meeting", "Second Attendence Status": "Training",
+         "First Attendence Datetime": "28-10-2026 08:00", "DSR Entry Status": "Submitted"},
+        {"Panchayat LGD": 4, "Mandal Name": "B", "Panchayat Name": "GP4",
+         "First Attendence Status": "", "Second Attendence Status": "Present",
+         "First Attendence Datetime": "", "DSR Entry Status": ""},
+        {"Panchayat LGD": 5, "Mandal Name": "B", "Panchayat Name": "GP5",
+         "First Attendence Status": "Present", "Second Attendence Status": "",
+         "First Attendence Datetime": "28-10-2026 08:00", "DSR Entry Status": "Not Entered"},
+    ])
+
+    report = analyze_attendance(frame)
+
+    assert report.dsr_district_total == {
+        "total_gps": 5,
+        "present_ps": 4,
+        "dsr_entered": 1,
+        "dsr_pct": 25,
+        "dsr_pending": 3,
+    }
+    assert {row["gp"] for row in report.dsr_pending_rows} == {"GP2", "GP4", "GP5"}
+    assert "Second: Present" in next(row for row in report.dsr_pending_rows if row["gp"] == "GP2")["attendance_status"]
+
+
 def test_empty_sections_are_rendered_and_district_totals_remain_correct(tmp_path: Path):
     frame = attendance_rows().iloc[[0]].copy()
     report = analyze_attendance(frame)
     assert report.totals["unique_gps"] == 1
     assert report.district_total["total_gps"] == 1
     assert report.district_total["before_9"] == 1
+    assert report.district_total["attendance_pct"] == 100
+    assert report.dsr_district_total["dsr_pct"] == 100
     assert report.pending_rows == []
     assert report.leave_rows == []
     assert report.meeting_training_rows == []
     assert report.after_9_rows == []
+    assert report.dsr_pending_rows == []
 
     pdf_path = generate_pdf(report, tmp_path / "empty-sections.pdf")
     reader = PdfReader(str(pdf_path))
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     assert "KHAMMAM DISTRICT" in text
     assert text.count("No records found for this section.") == 4
+    assert "No eligible GPs have pending DSR." in text
+    assert "Overall Attendance %" in text
+    assert "Prepare DSR Report" in text
+    assert "% GPs DSR submitted" in text
     assert "DISTRICT TOTAL" in text
 
 
@@ -161,10 +225,16 @@ def test_pdf_generation_includes_all_report_section_titles(tmp_path: Path):
     assert float(reader.pages[0].mediabox.height) == pytest.approx(841.89, abs=0.1)
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     assert "Mandal-wise Attendance Abstract" in text
+    assert "Overall Attendance %" in text
+    assert "Prepare DSR Report" in text
+    assert "No. of PS present" in text
+    assert "No. of GPs DSR entered" in text
+    assert "% GPs DSR submitted" in text
     assert "ATTENDANCE PENDING LIST" in text
     assert "PS ON LEAVE LIST" in text
     assert "TRAINING / MEETING LIST" in text
     assert "AFTER 9 AM" in text
+    assert "DSR PENDING GPs LIST" in text
     assert "GP Seven Conflict" in text or "conflicting names" in text
 
 
@@ -175,7 +245,9 @@ def test_mandal_abstract_repeats_column_headers_when_continued(tmp_path: Path):
             "Mandal Name": f"Mandal {index:02d}",
             "Panchayat Name": f"GP {index:02d}",
             "First Attendence Status": "Present",
+            "Second Attendence Status": "",
             "First Attendence Datetime": "28-10-2026 08:00",
+            "DSR Entry Status": "Submitted",
         }
         for index in range(70)
     ])

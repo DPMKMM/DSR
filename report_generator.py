@@ -46,9 +46,29 @@ REQUIRED_COLUMNS = {
         "firstattendencestatus", "firstattendancestatus", "attendencestatus",
         "attendancestatus", "attendance", "status",
     },
+    "Second Attendence Status": {
+        "secondattendencestatus", "secondattendancestatus", "secondattendance",
+        "secondattendence", "secondstatus", "secondattendance1status",
+        "2ndattendencestatus", "2ndattendancestatus", "attendance2status",
+    },
     "First Attendence Datetime": {
         "firstattendencedatetime", "firstattendancedatetime", "attendencedatetime",
         "attendancedatetime", "attendancedateandtime", "attendancetime",
+    },
+}
+
+OPTIONAL_COLUMN_ALIASES = {
+    "DSR Status": {
+        "dsr", "dsrstatus", "dsrsubmitted", "dsrsubmissionstatus", "dsrsubmittedstatus",
+        "dsrentrystatus", "dsrreportstatus", "dsrreportentered", "dsrentered",
+        "dsrentry", "dailystatusreport", "dailystatusreportstatus",
+        "dailystatusreportsubmitted", "dailystatusreportentrystatus",
+    },
+    "DSR Datetime": {
+        "dsrdate", "dsrdatetime", "dsrsubmitteddate", "dsrsubmitteddatetime",
+        "dsrsubmissiondate", "dsrsubmissiondatetime", "dsrentrydate", "dsrentrydatetime",
+        "dsrreportdate", "dsrreportdatetime", "dsrentereddate", "dsrentereddatetime",
+        "dailystatusreportdate", "dailystatusreportdatetime",
     },
 }
 
@@ -71,16 +91,24 @@ class ReportData:
     leave_rows: list[dict[str, Any]]
     meeting_training_rows: list[dict[str, Any]]
     after_9_rows: list[dict[str, Any]]
+    dsr_mandal_rows: list[dict[str, Any]]
+    dsr_district_total: dict[str, Any]
+    dsr_pending_rows: list[dict[str, Any]]
 
     @property
-    def totals(self) -> dict[str, int]:
+    def totals(self) -> dict[str, Any]:
         return {
             "unique_gps": self.unique_gp_count,
+            "attendance_submitted": int(self.district_total["attendance_submitted"]),
+            "overall_attendance_pct": float(self.district_total["attendance_pct"]),
             "before_9": int(self.district_total["before_9"]),
             "on_leave": int(self.district_total["on_leave"]),
             "meeting_training": int(self.district_total["meeting_training"]),
             "pending": int(self.district_total["pending"]),
             "after_9": len(self.after_9_rows),
+            "dsr_eligible": int(self.dsr_district_total["present_ps"]),
+            "dsr_entered": int(self.dsr_district_total["dsr_entered"]),
+            "dsr_pending": int(self.dsr_district_total["dsr_pending"]),
         }
 
 
@@ -93,7 +121,7 @@ def _canonicalize_columns(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]
     frame = frame.loc[:, ~frame.columns.duplicated()].copy()
     aliases = {
         alias: canonical
-        for canonical, names in REQUIRED_COLUMNS.items()
+        for canonical, names in {**REQUIRED_COLUMNS, **OPTIONAL_COLUMN_ALIASES}.items()
         for alias in names
     }
     rename: dict[Any, str] = {}
@@ -197,6 +225,26 @@ def _clean_lgd(value: Any) -> str:
     return text
 
 
+def _is_present_status(value: Any) -> bool:
+    normalized = normalize_column_name(_clean_string(value))
+    return bool(normalized) and normalized.startswith("present") and "notpresent" not in normalized
+
+
+def _is_dsr_entered(value: Any, is_datetime: bool = False) -> bool:
+    text = _clean_string(value)
+    normalized = normalize_column_name(text)
+    if not normalized or normalized in {"na", "nan", "none", "null", "no", "n", "false", "0", "nodsr"}:
+        return False
+    if any(token in normalized for token in (
+        "pending", "notentered", "notentry", "noentry", "notsubmitted", "notreported", "notdone", "skipped",
+        "notavailable", "notapplicable", "notrequired", "noteligible", "missing",
+    )):
+        return False
+    if is_datetime:
+        return not pd.isna(_parse_timestamp(value)) or bool(text)
+    return True
+
+
 def _parse_timestamp(value: Any) -> Any:
     if pd.isna(value) or value == "":
         return pd.NaT
@@ -246,10 +294,20 @@ def analyze_attendance(frame: pd.DataFrame, filename: str = "attendance.xlsx") -
     frame, missing = _canonicalize_columns(frame.copy())
     if missing:
         raise InputValidationError("Required column(s) not found: " + ", ".join(missing))
+    dsr_columns = [column for column in ("DSR Status", "DSR Datetime") if column in frame.columns]
+    if not dsr_columns:
+        raise InputValidationError(
+            "A DSR submission column was not found. Include a DSR status or submission date/time "
+            "column (for example, DSR Entry Status or DSR Date)."
+        )
+
     frame["Panchayat LGD"] = frame["Panchayat LGD"].map(_clean_lgd)
     frame["Mandal Name"] = frame["Mandal Name"].map(_clean_string)
     frame["Panchayat Name"] = frame["Panchayat Name"].map(_clean_string)
     frame["First Attendence Status"] = frame["First Attendence Status"].map(_clean_string)
+    frame["Second Attendence Status"] = frame["Second Attendence Status"].map(_clean_string)
+    for column in dsr_columns:
+        frame[column] = frame[column].map(_clean_string)
     frame["_timestamp"] = frame["First Attendence Datetime"].map(_parse_timestamp)
 
     valid = frame.loc[frame["Panchayat LGD"].ne("")].copy()
@@ -275,6 +333,26 @@ def analyze_attendance(frame: pd.DataFrame, filename: str = "attendance.xlsx") -
 
         submitted = group.loc[group["First Attendence Status"].ne("")]
         chosen = submitted.iloc[0] if not submitted.empty else group.iloc[0]
+        first_attendance = next(
+            (value for value in group["First Attendence Status"] if value), ""
+        )
+        second_attendance = next(
+            (value for value in group["Second Attendence Status"] if value), ""
+        )
+        present = any(
+            _is_present_status(first) or _is_present_status(second)
+            for first, second in zip(group["First Attendence Status"], group["Second Attendence Status"])
+        )
+        dsr_entered = any(
+            _is_dsr_entered(row[column], is_datetime=(column == "DSR Datetime"))
+            for _, row in group.iterrows()
+            for column in dsr_columns
+        )
+        attendance_status = "; ".join(
+            f"{label}: {value}" for label, value in (
+                ("First", first_attendance), ("Second", second_attendance),
+            ) if value
+        ) or "No attendance status"
         unique_rows.append({
             "lgd": str(lgd),
             "mandal": mandals[0] if mandals else "(Unspecified)",
@@ -282,6 +360,11 @@ def analyze_attendance(frame: pd.DataFrame, filename: str = "attendance.xlsx") -
             "status": chosen["First Attendence Status"],
             "timestamp": chosen["First Attendence Datetime"],
             "parsed_timestamp": chosen["_timestamp"],
+            "first_attendance": first_attendance,
+            "second_attendance": second_attendance,
+            "dsr_eligible": present,
+            "dsr_entered": present and dsr_entered,
+            "dsr_attendance_status": attendance_status,
         })
 
     records = pd.DataFrame(unique_rows)
@@ -313,6 +396,8 @@ def analyze_attendance(frame: pd.DataFrame, filename: str = "attendance.xlsx") -
         mandal_rows.append({
             "mandal": mandal,
             "total_gps": total,
+            "attendance_submitted": int(group["submitted"].sum()),
+            "attendance_pct": (int(group["submitted"].sum()) / total * 100) if total else 0.0,
             "before_9": before,
             "before_9_pct": (before / total * 100) if total else 0.0,
             "on_leave": int(group["on_leave"].sum()),
@@ -327,11 +412,39 @@ def analyze_attendance(frame: pd.DataFrame, filename: str = "attendance.xlsx") -
     district_before = int(records["before_9"].sum())
     district_total = {
         "total_gps": district_gps,
+        "attendance_submitted": int(records["submitted"].sum()),
+        "attendance_pct": int(records["submitted"].sum()) / district_gps * 100 if district_gps else 0.0,
         "before_9": district_before,
         "before_9_pct": district_before / district_gps * 100 if district_gps else 0.0,
         "on_leave": int(records["on_leave"].sum()),
         "meeting_training": int(records["meeting_training"].sum()),
         "pending": int(records["pending"].sum()),
+    }
+
+    dsr_mandal_rows: list[dict[str, Any]] = []
+    for mandal, group in records.groupby("mandal", sort=False):
+        present_ps = int(group["dsr_eligible"].sum())
+        dsr_entered = int(group["dsr_entered"].sum())
+        dsr_mandal_rows.append({
+            "mandal": mandal,
+            "total_gps": len(group),
+            "present_ps": present_ps,
+            "dsr_entered": dsr_entered,
+            "dsr_pct": dsr_entered / present_ps * 100 if present_ps else 0.0,
+            "dsr_pending": int((group["dsr_eligible"] & ~group["dsr_entered"]).sum()),
+        })
+    dsr_mandal_rows.sort(key=lambda item: item["mandal"].casefold())
+    for index, item in enumerate(dsr_mandal_rows, start=1):
+        item["serial"] = index
+
+    dsr_present_ps = int(records["dsr_eligible"].sum())
+    dsr_entered_total = int(records["dsr_entered"].sum())
+    dsr_district_total = {
+        "total_gps": district_gps,
+        "present_ps": dsr_present_ps,
+        "dsr_entered": dsr_entered_total,
+        "dsr_pct": dsr_entered_total / dsr_present_ps * 100 if dsr_present_ps else 0.0,
+        "dsr_pending": int((records["dsr_eligible"] & ~records["dsr_entered"]).sum()),
     }
 
     def make_rows(mask: pd.Series) -> list[dict[str, Any]]:
@@ -351,6 +464,20 @@ def analyze_attendance(frame: pd.DataFrame, filename: str = "attendance.xlsx") -
     leave_rows = make_rows(records["on_leave"])
     meeting_training_rows = make_rows(records["meeting_training"])
     after_9_rows = make_rows(records["after_9"])
+    dsr_pending_records = records.loc[records["dsr_eligible"] & ~records["dsr_entered"]]
+    dsr_pending_records = dsr_pending_records.sort_values(
+        ["mandal", "gp"], key=lambda column: column.str.casefold(), kind="stable"
+    )
+    dsr_pending_rows = [
+        {
+            "serial": index,
+            "mandal": row.mandal,
+            "gp": row.gp,
+            "attendance_status": row.dsr_attendance_status,
+            "dsr_status": "DSR not entered",
+        }
+        for index, row in enumerate(dsr_pending_records.itertuples(index=False), start=1)
+    ]
     # Use all available recorded dates to infer the report date.
     report_date = _report_date(filename, valid["_timestamp"])
     return ReportData(
@@ -366,6 +493,9 @@ def analyze_attendance(frame: pd.DataFrame, filename: str = "attendance.xlsx") -
         leave_rows=leave_rows,
         meeting_training_rows=meeting_training_rows,
         after_9_rows=after_9_rows,
+        dsr_mandal_rows=dsr_mandal_rows,
+        dsr_district_total=dsr_district_total,
+        dsr_pending_rows=dsr_pending_rows,
     )
 
 
@@ -451,7 +581,7 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
     ) -> Table:
         data: list[list[Any]] = [[
             Paragraph(
-                safe(value),
+                safe(value).replace("\n", "<br/>"),
                 styles["TableHeaderLeft"] if column_index in left_columns else styles["TableHeader"],
             )
             for column_index, value in enumerate(headers)
@@ -508,11 +638,11 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
 
     abstract_headers = [
         "Sl. No.", "Mandal", "No. of GPs",
-        "No. of GPs submitted attendance before 9 AM",
-        "% of GPs submitted attendance before 9 AM", "No. of PS on leave",
-        "No. of PS in training or meeting", "No. of GPs with attendance pending",
+        "No. of GPs submitted\nattendance before 9 AM",
+        "Attendance %\nbefore 9 AM", "Overall\nAttendance %", "No. of PS\non leave",
+        "No. of PS in\ntraining/meeting", "No. of GPs with\nattendance pending",
     ]
-    widths = [10 * mm, 26 * mm, 14 * mm, 33 * mm, 27 * mm, 17 * mm, 32 * mm, 27 * mm]
+    widths = [11 * mm, 24 * mm, 12 * mm, 28 * mm, 22 * mm, 22 * mm, 14 * mm, 27 * mm, 26 * mm]
     # Keep all eight columns inside the printable A4 width even if margins change.
     scale = min(1.0, available_width / sum(widths))
     widths = [width * scale for width in widths]
@@ -520,13 +650,15 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
     for item in report.mandal_rows:
         abstract_rows.append([
             item["serial"], item["mandal"], item["total_gps"], item["before_9"],
-            PercentBar(item["before_9_pct"], widths[4] - 5), item["on_leave"],
+            PercentBar(item["before_9_pct"], widths[4] - 5),
+            PercentBar(item["attendance_pct"], widths[5] - 5), item["on_leave"],
             item["meeting_training"], item["pending"],
         ])
     total = report.district_total
     abstract_rows.append([
         "", "DISTRICT TOTAL", total["total_gps"], total["before_9"],
-        PercentBar(total["before_9_pct"], widths[4] - 5), total["on_leave"],
+        PercentBar(total["before_9_pct"], widths[4] - 5),
+        PercentBar(total["attendance_pct"], widths[5] - 5), total["on_leave"],
         total["meeting_training"], total["pending"],
     ])
     story.append(make_table(abstract_headers, abstract_rows, widths, left_columns=(1,), total_row=True))
@@ -534,6 +666,7 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
     story.append(Paragraph(
         "Method: A nonblank attendance status counts as submitted. Attendance at or before 09:00 counts "
         "as before 9 AM; after 09:00 counts as after 9 AM. Pending means the status is blank. "
+        "Overall Attendance % is all GPs with a nonblank first attendance status divided by all GPs. "
         "All totals use one record per nonblank Panchayat LGD code.", styles["Note"],
     ))
     if report.duplicate_lgd_rows:
@@ -556,6 +689,34 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
             styles["Note"],
         ))
 
+    story.append(PageBreak())
+    story.append(Paragraph("2. Prepare DSR Report", styles["SectionTitle"]))
+    dsr_headers = [
+        "Sl. No.", "Mandal", "Total No. of GPs", "No. of PS present",
+        "No. of GPs DSR entered", "% GPs DSR submitted",
+    ]
+    dsr_widths = [12 * mm, 46 * mm, 32 * mm, 31 * mm, 33 * mm, available_width - 154 * mm]
+    dsr_rows: list[list[Any]] = [
+        [
+            item["serial"], item["mandal"], item["total_gps"], item["present_ps"],
+            item["dsr_entered"], PercentBar(item["dsr_pct"], dsr_widths[5] - 5),
+        ]
+        for item in report.dsr_mandal_rows
+    ]
+    dsr_total = report.dsr_district_total
+    dsr_rows.append([
+        "", "DISTRICT TOTAL", dsr_total["total_gps"], dsr_total["present_ps"],
+        dsr_total["dsr_entered"], PercentBar(dsr_total["dsr_pct"], dsr_widths[5] - 5),
+    ])
+    story.append(make_table(dsr_headers, dsr_rows, dsr_widths, left_columns=(1,), total_row=True))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(
+        "Method: A GP is eligible for DSR only when First Attendence Status or Second Attendence Status "
+        "is Present. Meeting, Training, Leave, and other non-Present statuses are excluded. DSR % is "
+        "calculated as entered DSRs divided by eligible PS present. Each GP is counted once by LGD code.",
+        styles["Note"],
+    ))
+
     def append_list_section(title: str, total_label: str, rows: list[dict[str, Any]]) -> None:
         story.append(PageBreak())
         story.append(Paragraph(title, styles["SectionTitle"]))
@@ -573,14 +734,43 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
             table.setStyle(TableStyle([("SPAN", (2, 1), (4, 1)), ("ALIGN", (2, 1), (4, 1), "LEFT")]))
         story.append(table)
 
-    append_list_section("2. ATTENDANCE PENDING LIST", "Total pending GPs", report.pending_rows)
-    append_list_section("3. PS ON LEAVE LIST", "Total PS on leave", report.leave_rows)
+    append_list_section("3. ATTENDANCE PENDING LIST", "Total pending GPs", report.pending_rows)
+    append_list_section("4. PS ON LEAVE LIST", "Total PS on leave", report.leave_rows)
     append_list_section(
-        "4. TRAINING / MEETING LIST", "Total training/meeting records", report.meeting_training_rows,
+        "5. TRAINING / MEETING LIST", "Total training/meeting records", report.meeting_training_rows,
     )
     append_list_section(
-        "5. GPs THAT SUBMITTED ATTENDANCE AFTER 9 AM", "Total GPs after 9 AM", report.after_9_rows,
+        "6. GPs THAT SUBMITTED ATTENDANCE AFTER 9 AM", "Total GPs after 9 AM", report.after_9_rows,
     )
+
+    story.append(PageBreak())
+    story.append(Paragraph("7. DSR PENDING GPs LIST", styles["SectionTitle"]))
+    story.append(Paragraph(
+        f"Total eligible GPs with DSR pending: {len(report.dsr_pending_rows):,}",
+        styles["ReportSubtitle"],
+    ))
+    dsr_pending_headers = [
+        "Sl. No.", "Mandal", "Gram Panchayat", "Attendance Status", "DSR Status",
+    ]
+    dsr_pending_widths = [12 * mm, 37 * mm, 45 * mm, 62 * mm, available_width - 156 * mm]
+    dsr_pending_table_rows: list[list[Any]] = [
+        [
+            item["serial"], item["mandal"], item["gp"],
+            item["attendance_status"], item["dsr_status"],
+        ]
+        for item in report.dsr_pending_rows
+    ]
+    if not dsr_pending_table_rows:
+        dsr_pending_table_rows = [["-", "-", "No eligible GPs have pending DSR.", "-", "-"]]
+    dsr_pending_table = make_table(
+        dsr_pending_headers, dsr_pending_table_rows, dsr_pending_widths,
+        left_columns=(1, 2, 3, 4),
+    )
+    if not report.dsr_pending_rows:
+        dsr_pending_table.setStyle(TableStyle([
+            ("SPAN", (2, 1), (4, 1)), ("ALIGN", (2, 1), (4, 1), "LEFT"),
+        ]))
+    story.append(dsr_pending_table)
 
     doc = SimpleDocTemplate(
         str(output), pagesize=A4, rightMargin=margin, leftMargin=margin,

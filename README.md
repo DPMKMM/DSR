@@ -6,10 +6,14 @@ A FastAPI web application for uploading Gram Panchayat attendance files and down
 
 - Accepts .xls, .xlsx, .csv, and HTML tables saved as .xls.
 - Deduplicates Gram Panchayat records by Panchayat LGD and flags conflicting names.
-- Applies the attendance cutoff, leave, pending, and training/meeting rules.
-- Generates a Mandal-wise abstract and separate attendance exception lists.
+- Shows both submitted-attendance percentage and attendance-before-9-AM percentage in the Mandal abstract.
+- Builds a DSR abstract using GPs where `First Attendence Status` or `Second Attendence Status` is `Present`.
+- Counts DSR submissions only for eligible present PSs; Leave, Meeting, Training, and other statuses are excluded.
+- Adds a DSR-pending GP list after the attendance exception lists.
 - Downloads the PDF automatically as PS_Attendance_Report_YYYY-MM-DD_HH-MM-SS.pdf.
 - Keeps each report download private to the browser session that uploaded it.
+
+The uploaded source must include `First Attendence Status`, `Second Attendence Status`, `DSR Entry Status`, and the existing Panchayat LGD, Mandal Name, Panchayat Name, and attendance timestamp fields. Column names are matched case-insensitively and common DSR status/date aliases are accepted. If no DSR field can be detected, the upload returns a validation error instead of producing misleading DSR totals.
 
 ## Run locally on Windows
 
