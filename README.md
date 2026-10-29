@@ -9,7 +9,8 @@ A FastAPI web application for uploading Gram Panchayat attendance files and down
 - Shows both submitted-attendance percentage and attendance-before-9-AM percentage in the Mandal abstract.
 - Builds a DSR abstract using GPs where `First Attendence Status` or `Second Attendence Status` is `Present`.
 - Counts DSR submissions only for eligible present PSs; Leave, Meeting, Training, and other statuses are excluded.
-- Adds a DSR-pending GP list after the attendance exception lists.
+- Sorts the DSR abstract by DSR-pending GP count in ascending order.
+- Places the DSR-pending GP list immediately after the attendance-pending list.
 - Downloads the PDF automatically as PS_Attendance_Report_YYYY-MM-DD_HH-MM-SS.pdf.
 - Keeps each report download private to the browser session that uploaded it.
 

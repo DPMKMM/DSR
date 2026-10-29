@@ -88,6 +88,8 @@ def test_valid_xlsx_generates_unique_mandal_abstract_and_categories():
     assert report.mandal_rows[0]["before_9_pct"] == 50
     assert report.mandal_rows[0]["attendance_pct"] == 75
     assert report.dsr_district_total["dsr_pct"] == pytest.approx(2 / 3 * 100)
+    assert report.dsr_district_total["dsr_pending"] == 1
+    assert [row["mandal"] for row in report.dsr_mandal_rows] == ["Mandal B", "Mandal A"]
     assert report.dsr_pending_rows[0]["gp"] == "GP Three"
 
 
@@ -233,6 +235,7 @@ def test_pdf_generation_includes_all_report_section_titles(tmp_path: Path):
     assert "Mandal-wise DSR Abstract Report" in text
     assert "No. of PS present" in text
     assert "No. of GPs DSR entered" in text
+    assert "No. of GPs DSR pending" in normalized_text
     assert "% GPs DSR submitted" in text
     assert "ATTENDANCE PENDING LIST" in text
     assert "PS ON LEAVE LIST" in text
@@ -242,6 +245,10 @@ def test_pdf_generation_includes_all_report_section_titles(tmp_path: Path):
     assert "DSR Pending GPs:" in text
     assert "Method:" not in text
     assert "GP Seven Conflict" in text or "conflicting names" in text
+    page_texts = [page.extract_text() or "" for page in reader.pages]
+    assert "ATTENDANCE PENDING LIST" in page_texts[2]
+    assert "DSR PENDING GPs LIST" in page_texts[3]
+    assert "PS ON LEAVE LIST" in page_texts[4]
 
 
 def test_mandal_abstract_repeats_column_headers_when_continued(tmp_path: Path):

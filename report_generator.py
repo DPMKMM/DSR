@@ -433,7 +433,7 @@ def analyze_attendance(frame: pd.DataFrame, filename: str = "attendance.xlsx") -
             "dsr_pct": dsr_entered / present_ps * 100 if present_ps else 0.0,
             "dsr_pending": int((group["dsr_eligible"] & ~group["dsr_entered"]).sum()),
         })
-    dsr_mandal_rows.sort(key=lambda item: item["mandal"].casefold())
+    dsr_mandal_rows.sort(key=lambda item: (item["dsr_pending"], item["mandal"].casefold()))
     for index, item in enumerate(dsr_mandal_rows, start=1):
         item["serial"] = index
 
@@ -687,20 +687,22 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
     story.append(Paragraph("2. Mandal-wise DSR Abstract Report", styles["SectionTitle"]))
     dsr_headers = [
         "Sl. No.", "Mandal", "Total No. of GPs", "No. of PS present",
-        "No. of GPs DSR entered", "% GPs DSR submitted",
+        "No. of GPs DSR entered", "No. of GPs DSR pending", "% GPs DSR submitted",
     ]
-    dsr_widths = [12 * mm, 46 * mm, 32 * mm, 31 * mm, 33 * mm, available_width - 154 * mm]
+    dsr_widths = [10 * mm, 38 * mm, 27 * mm, 27 * mm, 29 * mm, 27 * mm, available_width - 158 * mm]
     dsr_rows: list[list[Any]] = [
         [
             item["serial"], item["mandal"], item["total_gps"], item["present_ps"],
-            item["dsr_entered"], PercentBar(item["dsr_pct"], dsr_widths[5] - 5),
+            item["dsr_entered"], item["dsr_pending"],
+            PercentBar(item["dsr_pct"], dsr_widths[6] - 5),
         ]
         for item in report.dsr_mandal_rows
     ]
     dsr_total = report.dsr_district_total
     dsr_rows.append([
         "", "DISTRICT TOTAL", dsr_total["total_gps"], dsr_total["present_ps"],
-        dsr_total["dsr_entered"], PercentBar(dsr_total["dsr_pct"], dsr_widths[5] - 5),
+        dsr_total["dsr_entered"], dsr_total["dsr_pending"],
+        PercentBar(dsr_total["dsr_pct"], dsr_widths[6] - 5),
     ])
     story.append(make_table(dsr_headers, dsr_rows, dsr_widths, left_columns=(1,), total_row=True))
 
@@ -722,16 +724,9 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
         story.append(table)
 
     append_list_section("3. ATTENDANCE PENDING LIST", "Total pending GPs", report.pending_rows)
-    append_list_section("4. PS ON LEAVE LIST", "Total PS on leave", report.leave_rows)
-    append_list_section(
-        "5. TRAINING / MEETING LIST", "Total training/meeting records", report.meeting_training_rows,
-    )
-    append_list_section(
-        "6. GPs THAT SUBMITTED ATTENDANCE AFTER 9 AM", "Total GPs after 9 AM", report.after_9_rows,
-    )
 
     story.append(PageBreak())
-    story.append(Paragraph("7. DSR PENDING GPs LIST", styles["SectionTitle"]))
+    story.append(Paragraph("4. DSR PENDING GPs LIST", styles["SectionTitle"]))
     story.append(Paragraph(
         f"DSR Pending GPs: {len(report.dsr_pending_rows):,}",
         styles["ReportSubtitle"],
@@ -758,6 +753,14 @@ def generate_pdf(report: ReportData, output_path: str | Path) -> Path:
             ("SPAN", (2, 1), (4, 1)), ("ALIGN", (2, 1), (4, 1), "LEFT"),
         ]))
     story.append(dsr_pending_table)
+
+    append_list_section("5. PS ON LEAVE LIST", "Total PS on leave", report.leave_rows)
+    append_list_section(
+        "6. TRAINING / MEETING LIST", "Total training/meeting records", report.meeting_training_rows,
+    )
+    append_list_section(
+        "7. GPs THAT SUBMITTED ATTENDANCE AFTER 9 AM", "Total GPs after 9 AM", report.after_9_rows,
+    )
 
     doc = SimpleDocTemplate(
         str(output), pagesize=A4, rightMargin=margin, leftMargin=margin,
