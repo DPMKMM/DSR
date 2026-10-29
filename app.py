@@ -89,7 +89,7 @@ UPLOAD_PAGE_HTML = """<!doctype html>
       </div>
 
       <form id="upload-form">
-        <label for="attendance-file">Attendance Excel file</label>
+        <label for="attendance-file">Attendance data file</label>
         <input id="attendance-file" name="file" type="file" required>
         <label for="requested-by">Your name or office (optional)</label>
         <input id="requested-by" name="RequestedBy" type="text" maxlength="320"

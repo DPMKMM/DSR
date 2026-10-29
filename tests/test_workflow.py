@@ -345,6 +345,7 @@ def test_root_page_opens_directly_with_upload_and_download_workflow(tmp_path: Pa
     assert 'id="upload-form"' in response.text
     assert 'id="attendance-file" name="file" type="file" required' in response.text
     assert 'accept=' not in response.text
+    assert "Attendance data file" in response.text
     assert "HTML table saved as .xls" in response.text
     assert "Generate and download report" in response.text
     assert "/api/web/reports/" in response.text
